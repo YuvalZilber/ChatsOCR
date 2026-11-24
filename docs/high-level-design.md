@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Draft 2, revised after an independent review |
+| Status | Draft 3, revised after two independent review rounds; open questions in requirements §13 |
 | Date | 2026-11-24 |
 | Related | [Requirements](requirements.md) · [Output format](output-format.md) · [Background research](research/README.md) |
 
@@ -36,7 +36,7 @@ In priority order:
 | D10 | **An engine-owned bidi normalizer** rebuilds the text from word boxes. It tests both paragraph directions as hypotheses against pixel evidence and flags ties. | Both OCR engines return logical order, but both get the paragraph direction of some mixed lines wrong. Choosing by the first strong character is circular when the input is visual. | Trusting the OCR engine's order; `python-bidi` (LGPL, and its `get_display` does not mirror brackets) |
 | D11 | **Plugin geometry is in dp or em.** The engine estimates the scale from measured text line height, not from image width alone. A plugin can override this with `estimate_scale`. | One plugin then serves 1080/1170/1440 px phones and desktop scaling of 100–200%. | Pixel constants per resolution; a fixed dp of 1.0 on desktop |
 | D12 | **Plugin discovery** has three sources: modules under the built-in `chatsocr.plugins` package, the `chatsocr.plugins` entry-point group, and plugin directories (`--plugin-dir`, the user's plugin directory). Every plugin follows one routing and precedence rule (§6.8). | Adding a plugin, even a built-in one, means adding files. No central list needs editing. | A hand-kept list of built-ins; namespace packages |
-| D13 | **The plugin API is provisional (0.x) until the M3 agent pilot ends.** Semantic-versioning guarantees start at the first public release. | The pilot exists to find gaps in the API. Freezing the API before it would force a major version bump for every fix. | Freezing a v1 in M0 |
+| D13 | **The plugin API stays provisional (0.x) through M5.** It is reviewed after the M3 agent pilot and released as 1.0 with the first public release, at the end of M5. Semantic versioning applies from 1.0. | The pilot exists to find gaps in the API. Freezing the API before it would force a major version bump for every fix. | Freezing a v1 in M0 |
 
 ---
 
@@ -90,7 +90,8 @@ chatsocr/
   devtools/         scaffold, inspect, overlay, eval, annotate
   testing/          Conformance kit (pytest11 plugin), detection fixture pack, scoring
   plugins/          Built-in plugins: whatsapp/, telegram/, hinge/ (plain plugins, no special access)
-  assets/           tessdata (heb, eng), Noto Color Emoji font, JSON Schema
+  schema/           transcript-1.schema.json (generated from model/)
+  assets/           tessdata (heb, eng), Noto Color Emoji font
 ```
 
 **Dependency rule:**
@@ -163,7 +164,9 @@ A **variant** is `VariantKey(app, platform, theme, ui_epoch)`, for example `("wh
 ### 6.2 The plugin contract (`chatsocr.plugin_api`, provisional 0.x)
 
 ```python
-# chatsocr/plugin_api/__init__.py  (indicative; `defaults` and the CvKit implementation are omitted here)
+# chatsocr/plugin_api/__init__.py  (indicative; `defaults` and the CvKit implementation are omitted here).
+# In the real package the IR classes live in plugin_api/_ir.py, which both this module and `defaults` import,
+# so `defaults` can build Elements without a circular import. Shown here as one module for readability.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -175,9 +178,9 @@ from typing import ClassVar, Literal, Protocol
 
 import numpy as np
 
-from . import defaults  # public: the engine's default grammars and default layout steps
+from . import defaults  # public: the engine's default grammars and default layout steps (imports from ._ir)
 
-API_VERSION = (0, 1)    # provisional until the first public release (D13)
+API_VERSION = (0, 1)    # provisional (0.x) through M5; 1.0 with the first public release (D13)
 
 BBox = tuple[int, int, int, int]  # x0, y0, x1, y1 in FULL-IMAGE pixels; origin top-left; x1/y1 exclusive
 Side = Literal["left", "right", "center"]
@@ -221,12 +224,10 @@ class Palette:                    # priors; the engine re-estimates actual color
 class BubbleLayout:               # drives BubbleChatPlugin's default steps (§6.3); lengths in dp
     header_h_dp: float
     composer_h_dp: float
-    body_line_dp: float = 20.0                    # nominal body line height (scale estimation, §7.1)
-    bubble_max_w_dp: float | None = None          # max text width in a bubble (line-break heuristic, §7.3)
     sidebar: Literal["none", "left"] = "none"     # desktop chat list
     column_max_w_dp: float | None = None          # centered message column in wide windows
     avatar_gutter_dp: float = 0.0                 # avatar column beside incoming bubbles
-    time_position: Literal["trailing_bottom", "below", "none"] = "trailing_bottom"
+    time_position: Literal["trailing_bottom", "below", "none"] = "trailing_bottom"   # "none" iff no per-message times
     quote_position: Literal["inside", "above"] = "inside"
     quote_bar_edge: Literal["leading", "trailing"] = "leading"     # relative to ui_direction
     separator_style: Literal["chip", "bare_text"] = "chip"
@@ -238,14 +239,16 @@ class BubbleLayout:               # drives BubbleChatPlugin's default steps (§6
 @dataclass(frozen=True, slots=True, kw_only=True)
 class VariantSpec:
     palette: Palette
-    layout: BubbleLayout | None = None            # required by BubbleChatPlugin; otherwise optional
-    emoji_style: str = "noto"                     # "whatsapp", "apple", "noto", "samsung", ...
+    layout: BubbleLayout | None = None            # required by BubbleChatPlugin's chrome step; otherwise optional
+    body_line_dp: float = 20.0                    # nominal body line height (scale estimation, §7.1)
+    bubble_max_w_dp: float | None = None          # max text width in a bubble (line-break heuristic, §7.3)
+    emoji_style: str = "noto"                     # "whatsapp", "apple", "noto", "samsung", or "system" (§7.4)
     mirrors_in_rtl_ui: bool = True                # WhatsApp: True; Telegram Android: False
-    shows_message_times: bool = True
+    shows_message_times: bool = True              # must agree with layout.time_position (validated)
     separators: Literal["date", "datetime"] = "date"   # "datetime": separators show a time and may repeat within a day
     date_order: Literal["DMY", "MDY", "YMD"] | None = None   # for numeric dates, when the locale fixes it
     quote_max_lines: int = 2
-    locales: tuple[str, ...] = ("en", "he")       # label vocabularies used by `defaults`
+    locales: tuple[str, ...] = ("en", "he")       # label vocabularies the app can show; ordered per run (§6.6)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -310,7 +313,7 @@ class PluginFlag(StrEnum):        # the only flag codes a plugin may set (a subs
     SIDE_UNCERTAIN = "SIDE_UNCERTAIN"
     MEDIA_KIND_UNCERTAIN = "MEDIA_KIND_UNCERTAIN"
     ELEMENT_UNRECOGNIZED = "ELEMENT_UNRECOGNIZED"
-    PARTIAL_MESSAGE = "PARTIAL_MESSAGE"
+    # Partial visibility is expressed with Element.cut; the engine decides PARTIAL_MESSAGE after joining (§7.6).
 
 
 @dataclass(slots=True, kw_only=True)
@@ -334,7 +337,7 @@ class Element:
     parts: list[Part] = field(default_factory=list)
     media_kind: str | None = None # None = text message; core kind or "x-..."
     subtype: str | None = None    # system subtype, Overlay value, or app-specific subtype
-    pinned: bool | None = False   # date chips only: True = pinned header, None = undecided (engine decides, §7.6)
+    pinned: bool | None = False   # DATE_SEPARATOR only: True = pinned pill (date evidence), None = undecided (§7.6)
     cut: Cut = "none"             # which edges may extend beyond the content area
     fill: Color | None = None     # bubble fill if known; otherwise the engine samples it locally
     confidence: float = 1.0       # classification and side confidence
@@ -351,7 +354,7 @@ class ScreenLayout:
     header_title: BBox | None = None  # contact name in the header (participant inference)
     status_clock: BBox | None = None  # status-bar clock (anchor cross-check)
     ui_direction: Direction = "ltr"
-    flags: list[PluginFlag] = field(default_factory=list)
+    ui_lang: str | None = None        # UI language if the plugin can tell (e.g. from a localized label)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -447,14 +450,22 @@ class ChatPlugin(ABC):
     requires: ClassVar[tuple[str, ...]] = ()             # optional imports, e.g. ("onnxruntime",)
     priority: ClassVar[int] = 0
 
+    __plugin_abstract__: ClassVar[bool] = True
+
     def __init_subclass__(cls, abstract: bool = False, **kw: object) -> None:
         super().__init_subclass__(**kw)
-        # Real version: unless abstract, validate id, api_version, variants, palettes, layouts, media_kinds.
+        cls.__plugin_abstract__ = abstract   # discovery skips classes declared abstract=True (§6.8)
+        # Real version: unless abstract, validate id, api_version, variants, palettes, layouts, media_kinds,
+        # and that shows_message_times == (layout.time_position != "none") when a layout is given.
 
-    def __init__(self, variant: VariantKey, options: Mapping[str, object] | None = None) -> None:
+    def __init__(self, variant: VariantKey, options: Mapping[str, object] | None = None,
+                 locales: Sequence[str] | None = None) -> None:
         self.variant = variant
         self.spec = self.variants[variant]
         self.options = dict(options or {})
+        # The engine passes spec.locales reordered for this run: the --ui-lang hint or the UI language
+        # inferred for the batch comes first (§6.6). The default grammar hooks use self.locales.
+        self.locales: tuple[str, ...] = tuple(locales or self.spec.locales)
 
     # --- detection: cheap classmethod, no model loading ---
     @classmethod
@@ -471,22 +482,22 @@ class ChatPlugin(ABC):
 
     # --- grammar hooks: the engine always calls these; a returned None is final ---
     def parse_time(self, text: str) -> time | None:
-        return defaults.parse_time(text, self.spec.locales)
+        return defaults.parse_time(text, self.locales)
 
     def parse_date_label(self, text: str) -> DateLabel | None:
-        return defaults.parse_date_label(text, self.spec.locales)
+        return defaults.parse_date_label(text, self.locales)
 
     def classify_system(self, text: str) -> str | None:              # -> subtype
-        return defaults.classify_system(text, self.spec.locales)
+        return defaults.classify_system(text, self.locales)
 
     def describe_media(self, el: Element) -> list[MediaInfo]:        # one per media item; parts already OCR'd
         return defaults.describe_media(el)
 
     def classify_quote(self, quote: Part) -> MediaInfo | None:       # "Photo" -> image, ...
-        return defaults.classify_quote(quote, self.spec.locales, self.media_kinds)
+        return defaults.classify_quote(quote, self.locales, self.media_kinds)
 
     def quote_sender_is_self(self, text: str) -> bool | None:        # "You", "את/ה"
-        return defaults.quote_sender_is_self(text, self.spec.locales)
+        return defaults.quote_sender_is_self(text, self.locales)
 
     def paragraph_direction(self, el: Element, lines: Sequence[str]) -> Direction | None:
         return None                                                  # None -> the engine's hypothesis test
@@ -496,7 +507,8 @@ class ChatPlugin(ABC):
 
 
 class StepwisePlugin(ChatPlugin, abstract=True):
-    """Template method. Every step except find_blocks/classify_block has a working default."""
+    """Template method. find_blocks/classify_block are abstract. The other steps have simple defaults:
+    no chrome (whole image is content), no overlays, ltr, one BODY/LABEL part per element, no header title."""
 
     def parse_screen(self, ctx: ScreenContext) -> ScreenLayout:
         chrome = self.find_chrome(ctx)
@@ -540,7 +552,7 @@ class StepwisePlugin(ChatPlugin, abstract=True):
         return "ltr"
 
     def find_parts(self, ctx: ScreenContext, el: Element, direction: Direction) -> None:
-        return None
+        defaults.single_text_part(el)          # one BODY (messages) or LABEL (others) part over the anchor box
 
     def cut_state(self, ctx: ScreenContext, el: Element, area: BBox) -> Cut:
         return defaults.cut_from_edges(el, area, ctx.em)
@@ -576,6 +588,9 @@ class BubbleChatPlugin(StepwisePlugin, abstract=True):
     def find_parts(self, ctx: ScreenContext, el: Element, direction: Direction) -> None:
         defaults.bubble.find_parts(ctx, el, direction, self.spec)
 
+    def cut_state(self, ctx: ScreenContext, el: Element, area: BBox) -> Cut:
+        return defaults.bubble.cut_state(ctx, el, area, self.spec)
+
     def find_header_title(self, ctx: ScreenContext, chrome: Mapping[str, BBox]) -> BBox | None:
         return defaults.bubble.header_title(ctx, chrome, self.spec)
 
@@ -585,7 +600,8 @@ class BubbleChatPlugin(StepwisePlugin, abstract=True):
 
 class SequentialPlugin(BubbleChatPlugin, abstract=True):
     """The user's model: walk down the screen one element at a time. Chrome, overlays, direction, parts and
-    cut come from BubbleChatPlugin unless overridden; the author writes detect() and crop_next_element()."""
+    cut come from BubbleChatPlugin unless overridden; the author writes detect() and crop_next_element(),
+    and declares a BubbleLayout (header/composer heights) or overrides find_chrome."""
 
     def find_elements(self, ctx: ScreenContext, area: BBox, overlays: Sequence[Element]) -> list[Element]:
         elements: list[Element] = []
@@ -608,14 +624,14 @@ class SequentialPlugin(BubbleChatPlugin, abstract=True):
 
 | Step | Default algorithm | Fields that drive it |
 |---|---|---|
-| `find_chrome` | Horizontal bands that match the expected header and composer heights, plus the status and navigation bars (uniform bands at the top and bottom edges). A left sidebar where `sidebar="left"`. | `header_h_dp`, `composer_h_dp`, `sidebar` |
+| `find_chrome` | Horizontal bands that match the expected header and composer heights, plus the status and navigation bars (uniform bands at the top and bottom edges). A left sidebar where `sidebar="left"`. Without a `layout`: uniform edge bands only. | `header_h_dp`, `composer_h_dp`, `sidebar` |
 | `content_area` | The area between the chrome. With `column_max_w_dp`, the centered column. | `column_max_w_dp` |
-| `find_overlays` | **Keyboard:** `cv.key_grid` below the content. **Pinned date pill:** a chip within 1 em of the content top, `pinned=None` when `date_header_pins`. **Scroll button:** a round icon near the bottom trailing corner that overlaps content. **Unread banner:** a full-width strip. **Typing indicator:** an animated-dots icon template. | `date_header_pins`, palette |
+| `find_overlays` | **Keyboard:** `cv.key_grid` below the content. **Scroll button:** a round icon near the bottom trailing corner that overlaps content. **Unread banner:** a full-width strip. **Typing indicator:** an animated-dots icon template. (A date chip near the top is *not* an overlay here; see `classify_block`.) | palette |
 | `find_blocks` | Flat regions in the bubble colors (`flat_regions`, or a shaded-region helper for `Gradient` fills). Centered chips, or centered bare text lines when `separator_style="bare_text"`. Textured rectangles (media without a bubble). Color blobs (stickers and jumbo emoji without a bubble). Areas covered by overlays are excluded. | palette, `separator_style` |
-| `classify_block` | **Bubble:** side from horizontal anchoring (left or right edge of the content area or column, allowing for `avatar_gutter_dp`); kind MESSAGE. **Chip:** DATE_SEPARATOR if `parse_date_label(ctx.ocr(chip))` succeeds, otherwise SYSTEM. **Textured rectangle or color blob:** MESSAGE with `media_kind` `image`, `sticker` or a jumbo-emoji EMOJI part, by size and texture. A centered block that matches nothing is SYSTEM with `ELEMENT_UNRECOGNIZED`. | palette, layout |
-| `ui_direction` | `rtl` if the outgoing bubble color (`bubble_out`) is on the left, else `ltr`. Only when `mirrors_in_rtl_ui`; otherwise always `ltr`. Computed **before** `find_parts`. | `mirrors_in_rtl_ui` |
+| `classify_block` | **Bubble:** side from horizontal anchoring (left or right edge of the content area or column, allowing for `avatar_gutter_dp`); kind MESSAGE. **Chip:** DATE_SEPARATOR if `parse_date_label(ctx.ocr(chip))` succeeds or the label *looks* like a date (digits, month or weekday words; the engine then flags `DATE_LABEL_UNPARSED`), otherwise SYSTEM. A date chip within 1 em of the content top gets `pinned=None` when `date_header_pins`: it may be the pinned pill (§7.6 step 3). **Textured rectangle or color blob:** MESSAGE with `media_kind` `image`, `sticker` or a jumbo-emoji EMOJI part, by size and texture. A centered block that matches nothing is SYSTEM with subtype `unknown` and `ELEMENT_UNRECOGNIZED`. | palette, layout |
+| `ui_direction` | Only when `mirrors_in_rtl_ui` (otherwise always `ltr`). In order of evidence: (1) the side of any bubble in `bubble_out` color: left means `rtl`; (2) the `--ui-lang` hint (`he` means `rtl`); (3) which bottom corner of the bubbles holds time-shaped glyph clusters; (4) `ltr`. Computed **before** `find_parts`. The engine checks agreement across the batch at barrier 2. | `mirrors_in_rtl_ui` |
 | `find_parts` | **TIME/STATUS:** the small glyph cluster in the *trailing* bottom corner (trailing is resolved with `direction`), or a row below the bubble for `time_position="below"`. **REPLY_QUOTE:** quote bar plus tinted block at the top of the bubble on the `quote_bar_edge` side, or the separate faded bubble above for `quote_position="above"`, which is merged into `bbox`. **LINK_PREVIEW:** a card with a thumbnail, title and domain inside a bubble that also contains URL text; with `link_preview_bar`, a colored bar does not make it a quote. **MEDIA** and **MEDIA_INFO** inside the bubble. **STATUS row** below the latest outgoing message when `status_row_below`. | `time_position`, `quote_position`, `quote_bar_edge`, `link_preview_bar`, `status_row_below` |
-| `cut_state` | `top`/`bottom`/`both` when the element is within 0.25 em of the content edges. With `quote_position="above"`, also `top` when it starts within 3 em of the top edge, because the quote may be hidden. | `quote_position` |
+| `cut_state` (overridden in `BubbleChatPlugin`) | `top`/`bottom`/`both` when the element is within 0.25 em of the content edges. With `quote_position="above"`, also `top` when it starts within 3 em of the top edge, because the quote may be hidden. | `quote_position` |
 | `find_header_title` / `find_status_clock` | The largest text line in the header band; the time-shaped glyph cluster in the status bar | — |
 
 A plugin for an app that fits this model is **metadata, a palette, a `BubbleLayout` and `detect`** (§6.12). An app that does not fit overrides individual steps, subclasses `SequentialPlugin`, or writes `parse_screen` itself. Each default step has synthetic conformance fixtures: keyboard, pinned pill, scroll button, link preview, sticker, jumbo emoji, and cut-off elements (§10.3).
@@ -635,6 +651,8 @@ A plugin for an app that fits this model is **metadata, a palette, a `BubbleLayo
 | reply reference's coordinates | `Part(role=REPLY_QUOTE)` with `QUOTE_SENDER`, `QUOTE_TEXT` and `QUOTE_THUMB` children |
 | (implicit) date separators, system lines | Also returned as `Element`s of the matching `kind`. Returning `None` ends the screen. |
 | (implicit) overlays | Found before the walk by `find_overlays` and passed in, so the walk can step over them |
+
+A sequential plugin inherits `BubbleChatPlugin`'s chrome step, so its variants declare a `BubbleLayout` (at least the header and composer heights), or the plugin overrides `find_chrome`.
 
 Why the engine always receives a whole `ScreenLayout`:
 - the engine needs all elements at once to merge screenshots, handle cut-off messages and mask overlays;
@@ -664,6 +682,7 @@ After OCR, the engine fills `Part.text` and calls the plugin's grammar hooks.
 - The defaults live in `plugin_api.defaults` and cover English and Hebrew.
 - A plugin extends a default by calling `super()`, or restricts it by returning `None` for strings its app never shows. Example: Telegram has no "Yesterday" or weekday labels.
 - The engine always calls the plugin's method, and **`None` is final**.
+- The default hooks read `self.locales`: the variant's `locales`, reordered so that the run's UI language comes first. That language is the `--ui-lang` hint, or the one inferred for the batch at barrier 2 (§7.8). So the hint reaches the grammar without any hook needing a context.
 
 | Hook | Called with | Default |
 |---|---|---|
@@ -681,7 +700,7 @@ After OCR, the engine fills `Part.text` and calls the plugin's grammar hooks.
 - `interpret_app_specific` turns it into a list of ordinary `MESSAGE` or `SYSTEM` elements, each with its own parts and boxes. These then go through normal extraction: OCR (skipped for parts whose `text` is pre-filled), media crops and signatures.
 - The derived elements keep their list order and are clustered as one group keyed on their parent (§7.6).
 - New media kinds are declared in `media_kinds` with `MediaKindSpec`. That declaration says whether the kind has a picture (cropping, signatures), its attribute order in the text view, and which reply-quote labels refer to it.
-- Example: Hinge's opening card becomes Bar's message `<x-hinge-like on=prompt prompt="My simple pleasures" answer="coffee at sunrise"> haha same!`.
+- Example: Hinge's opening card becomes Bar's message `<x-hinge-like file=media/1-1.png on=prompt prompt="My simple pleasures" answer="coffee at sunrise"> haha same!` (`file=` is reserved for the crop of an `x-` kind with a picture).
 
 **Where engine work is still needed.**
 - New *apps* never require engine changes.
@@ -701,7 +720,7 @@ After OCR, the engine fills `Part.text` and calls the plugin's grammar hooks.
   | 1. App score | For each app: the mean, over screenshots, of the best confidence among that app's classes |
   | 2. App decision | **accept** when the top score is ≥ `accept` (0.6) and leads by ≥ `margin` (0.15); **ambiguous** when the top score is ≥ `floor` (0.25); otherwise **none**. Only this step can prompt. |
   | 3. Platform and epoch | Within the chosen app, the highest mean score wins. If the runner-up is within `margin`: `DETECTION_AMBIGUOUS` with the alternatives. No prompt. |
-  | 4. Per screenshot | The variant is the `Detection.variant` returned by the routed class (§6.8). A screenshot whose classes all returned `None` takes its theme from luminance and gets `DETECTION_LOW_CONFIDENCE`. |
+  | 4. Per screenshot | The variant is the `Detection.variant` returned by the routed class (§6.8). A screenshot for which every class of the chosen app and platform returned `None` is still parsed, through the **fallback route** in §6.8, with `DETECTION_LOW_CONFIDENCE`. |
 
   | Situation | Interactive | Non-interactive |
   |---|---|---|
@@ -713,8 +732,8 @@ After OCR, the engine fills `Part.text` and calls the plugin's grammar hooks.
 
   | Hint | Effect |
   |---|---|
-  | `--app` and `--platform` | Always use those plugins. `DETECTION_MISMATCH` if their mean is below the floor. Never exit 3. |
-  | `--app` only | Step 3 among that app's platforms. `DETECTION_MISMATCH` if the best is below the floor. Never exit 3. |
+  | `--app` and `--platform` | Always use those plugins (fallback route where nothing was detected). `DETECTION_MISMATCH` if their mean is below the floor. Never exit 3. |
+  | `--app` only | Step 3 among that app's platforms. If every score is 0, the platform comes from the image: a phone aspect ratio with an iOS status bar gives `ios`, otherwise `android`; a wide image gives `desktop`. `DETECTION_MISMATCH` if the best is below the floor. Never exit 3. |
   | `--theme` | Overrides the theme. |
   | `--ui-lang` | Read through `ctx.hints`. Used by the grammar's locale order and as a prior for `ui_direction`. |
   | File-name tokens | A prior that plugins may read. |
@@ -731,7 +750,7 @@ After OCR, the engine fills `Part.text` and calls the plugin's grammar hooks.
 - Each subdirectory with `__init__.py` is imported as a package, under a synthetic name `chatsocr_local_<hash(dir)>.<name>` registered in `sys.modules`. So relative imports (`from .common import …`) and `importlib.resources` (palette files, models) work.
 - Each top-level `.py` file is imported as a module under the same namespace.
 
-**Which classes are collected.** From each module, the concrete `ChatPlugin` subclasses that are defined in that module (`cls.__module__ == module.__name__`), are not abstract, and do not start with `_`.
+**Which classes are collected.** From each module, the `ChatPlugin` subclasses that are defined in that module (`cls.__module__ == module.__name__`), were not declared `abstract=True` (`__plugin_abstract__` is false; ABC abstractness alone is not enough, because an app base may implement every method), and do not start with `_`.
 
 **Validation** happens at class definition:
 - the `id` format;
@@ -743,9 +762,8 @@ After OCR, the engine fills `Part.text` and calls the plugin's grammar hooks.
 **Availability.** `requires` is checked with `importlib.util.find_spec`. If something is missing, the plugin is *unavailable* and the reason is shown by `chatsocr plugin list`. Models load lazily with `importlib.resources`.
 
 **Routing**, per screenshot:
-- Among the classes that **claim the chosen variant** and returned a Detection ≥ floor, the winner is chosen by **precedence**: the more specific class (fewer variants) first, then source (local > installed > built-in), then higher `priority`.
-- A class that returned `None` is never routed to.
-- With `--app`/`--platform` and no detection at or above the floor, the most specific claiming class is used.
+- **Normal route.** Among the classes that **claim the chosen variant** and returned a Detection ≥ floor, the winner is chosen by **precedence**: the more specific class (fewer variants) first, then source (local > installed > built-in), then higher `priority`, then `id` (alphabetical, for determinism). A class that returned `None` is not chosen when another class recognized the screenshot.
+- **Fallback route.** It applies when no class of the decided (app, platform) recognized the screenshot, or when the user forced `--app`/`--platform`. The engine builds the variant from what it knows: the app, the platform, and the theme from luminance. From the claiming classes' declared `variants` it takes the newest `ui_epoch`, with epochs compared as strings. The class is chosen by precedence, and the run is flagged `DETECTION_LOW_CONFIDENCE` (auto) or `DETECTION_MISMATCH` (hint).
 
 **Precedence for this case:**
 - To override one variant of a built-in plugin, a new class with a **new id** declares just that variant.
@@ -756,7 +774,7 @@ After OCR, the engine fills `Part.text` and calls the plugin's grammar hooks.
 ### 6.9 Versioning
 
 - `chatsocr.plugin_api` is the only public surface, marked `py.typed`.
-- **Provisional (0.x) until the M3 agent pilot has finished** (D13). Minor versions may change things, with a changelog. Built-in plugins move along with them.
+- **Provisional (0.x) through M5** (D13). 0.x minor versions may change things, with a changelog, and built-in plugins move along with them. The API is reviewed after the M3 agent pilot and released as **1.0 at the end of M5**, with the first public release.
 - **From 1.0, semantic versioning applies:**
   - Minor releases only add: optional fields, roles, hooks with defaults.
   - Removals raise `DeprecationWarning` for at least one minor release first. The conformance kit runs with `-W error::DeprecationWarning`.
@@ -793,8 +811,9 @@ chatsocr/plugins/
                  mirrors_in_rtl_ui=False (Android, verified in source), emoji_style "apple"
     android.py   ios.py (outgoing bubble_out is a Gradient in dark)   desktop.py (column_max_w_dp, sidebar)
   hinge/
-    common.py    HingeBase(BubbleChatPlugin, abstract=True): separators="datetime", shows_message_times=False,
-                 status_row_below=True ("Sent"), opening like/comment card as APP_SPECIFIC → x-hinge-like
+    common.py    HingeBase(BubbleChatPlugin, abstract=True): separators="datetime", shows_message_times=False
+                 with time_position="none", status_row_below=True ("Sent"), opening like/comment card as
+                 APP_SPECIFIC → x-hinge-like (has_picture=True)
     mobile.py    HingeMobile: {android, ios} × {light, dark}; emoji_style "apple" (iOS) / "system" (Android)
 ```
 
@@ -808,7 +827,7 @@ from chatsocr.plugin_api import BubbleChatPlugin, BubbleLayout, Detection, Palet
 
 LIGHT = VariantKey("chatty", "android", "light")
 DARK = VariantKey("chatty", "android", "dark")
-LAYOUT = BubbleLayout(header_h_dp=56, composer_h_dp=64, body_line_dp=20, bubble_max_w_dp=280)
+LAYOUT = BubbleLayout(header_h_dp=56, composer_h_dp=64)
 
 
 class ChattyAndroid(BubbleChatPlugin):
@@ -817,10 +836,10 @@ class ChattyAndroid(BubbleChatPlugin):
     variants = {
         LIGHT: VariantSpec(palette=Palette(background="#FFFFFF", bubble_in="#F0F0F0", bubble_out="#3D7EFF",
                                            chip="#E4E6EB", time_text="#8A8D91"),
-                           layout=LAYOUT, emoji_style="noto"),
+                           layout=LAYOUT, body_line_dp=20, bubble_max_w_dp=280, emoji_style="noto"),
         DARK: VariantSpec(palette=Palette(background="#000000", bubble_in="#262626", bubble_out="#3D7EFF",
                                           chip="#303030", time_text="#9A9A9A"),
-                          layout=LAYOUT, emoji_style="noto"),
+                          layout=LAYOUT, body_line_dp=20, bubble_max_w_dp=280, emoji_style="noto"),
     }
 
     @classmethod
@@ -864,7 +883,7 @@ About 30 lines. Every layout step is inherited from `BubbleChatPlugin`, and ever
 
 - **Scale** (D11):
   1. Estimate `em` from the **row profile** of the content area: the median height of text-line runs. This needs no bubble detection.
-  2. `dp` = `em / spec.layout.body_line_dp`, snapped to {1, 1.25, 1.5, 1.75, 2, 2.5, 2.625, 2.75, 3, 3.5}.
+  2. `dp` = `em / spec.body_line_dp`, snapped to {1, 1.25, 1.5, 1.75, 2, 2.5, 2.625, 2.75, 3, 3.5}.
   3. On phones, cross-check `dp` against the width prior (360–440 logical px).
   4. `plugin.estimate_scale` may override both, for example by measuring the header against its height in dp.
 
@@ -904,6 +923,7 @@ class OcrBackend(Protocol):
   - Before reading, the engine intersects overlay boxes with part boxes.
   - Occluded parts are read but marked `occluded`. Their fields rank like cut-off fields in §7.6.
   - An occluded TIME part is never parsed: `TIME_UNREADABLE` unless another observation has it.
+  - If the field finally chosen for an item (§7.6 step 7) comes from an occluded part, the item gets `PARTIAL_MESSAGE` for that field (`text` or `media`), shown as `[?partial]`. Media seen only while occluded is still cropped, and the occluded area is left out of its signatures.
 - **Post-processing:**
   - Strip bidi controls, then NFC.
   - **Prefix repair:** a Latin token followed by `-1`, `-n` or `-h` inside a Hebrew line is the `ב-Zoom` → `Zoom-1` failure. Re-read the single glyph next to the hyphen with `heb` in single-character mode, whitelisted to `בהוכלמש`. If confident, rebuild the token as `ב-Zoom`; otherwise flag `OCR_LOW_CONFIDENCE`.
@@ -919,7 +939,7 @@ class OcrBackend(Protocol):
 - words with boxes (each word's characters already in logical order);
 - emoji tokens (§7.4);
 - the bubble's text-area box;
-- `spec.layout.bubble_max_w_dp`.
+- `spec.bubble_max_w_dp` (may be `None`).
 
 **Steps:**
 1. If the backend reports visual order, reverse the characters of each RTL word and mirror its brackets.
@@ -938,7 +958,7 @@ class OcrBackend(Protocol):
    - A neutral takes its neighbours' direction when both neighbours agree; otherwise it takes P.
    - Group words into runs, order the runs by P, and order the words inside each run by the run's direction.
    - Mirror only `Bidi_Mirrored` characters in RTL runs.
-6. **Hard or soft line breaks** (FR-OCR-3), using the reference width W = `bubble_max_w_dp` (for captions, the media width):
+6. **Hard or soft line breaks** (FR-OCR-3), using the reference width W = `spec.bubble_max_w_dp` (for captions, the media width; if neither is known, only the gap rules below apply):
    - **Hard:** the bubble is narrower than W minus one word (the sender's own break made it narrow); or a line's end-side gap is more than 1.5 em *and* the next line's first word would have fitted.
    - **Soft:** the line's end-side gap is smaller than the next line's first word plus one space.
    - **Otherwise uncertain:** keep the newline and set `LINEBREAK_UNCERTAIN`.
@@ -966,7 +986,10 @@ Only `unicodedata` is used, so there is no LGPL dependency. Tests render logical
 5. Below the threshold the glyph is `U+FFFD`, flagged `EMOJI_UNIDENTIFIED`, with the top three guesses kept in `spans[].alternatives`.
 6. Skin-tone and ZWJ sequences that a style renders as several glyphs are output as their components, with `EMOJI_LOW_CONFIDENCE` (FR-EMO-5).
 
-**Template store** (`<user cache>/chatsocr/emoji/<style>/`, RGBA, normalized to 48 px, keyed by `spec.emoji_style`):
+**Template store** (RGBA, normalized to 48 px, keyed by style):
+- Templates rendered from fonts are reproducible, so they live in the **user cache directory** (`<user cache>/chatsocr/emoji/<style>/`).
+- Calibrated templates were made from the user's own screenshots, so they live in the **user data directory** (`<user data>/chatsocr/emoji/<style>/`). `chatsocr cache clear` never deletes them.
+- The style `system` stands for "the phone's own emoji". It resolves to the style named in config `[emoji] system`: by default `noto`, set to `samsung` after calibrating a Samsung phone.
 
 | Style | How the templates are made |
 |---|---|
@@ -977,7 +1000,7 @@ Only `unicodedata` is used, so there is no LGPL dependency. Tests render logical
 **Calibration steps:**
 1. `chatsocr emoji sheet --top 500` prints 50 numbered rows of 10, e.g. `#012 😀😃😄😁😆😅🤣😂🙂🙃`.
 2. The user pastes them into **any app that renders the target style**. WhatsApp "Message yourself" gives `whatsapp`; Telegram "Saved Messages" gives `apple`; a notes or messages app gives the phone's system style (`samsung`, `noto`). Then the user takes screenshots: about 4–6 per style on a phone.
-3. `chatsocr emoji calibrate --style whatsapp shots/` runs a **generic sheet parser**, not an app plugin:
+3. `chatsocr emoji calibrate --style whatsapp shots/` (the user names the style, e.g. `samsung` for a Samsung notes app) runs a **generic sheet parser**, not an app plugin:
    - it finds text rows by row profile and reads the `#NNN` markers with OCR;
    - it slices each row by the known glyph count and pitch, so no blob detection is needed;
    - it extracts alpha by keying out the measured local background.
@@ -991,23 +1014,18 @@ Only `unicodedata` is used, so there is no LGPL dependency. Tests render logical
 For each element of a `ScreenLayout`, extraction runs these steps in order:
 
 1. **Occlusion and emoji.** Compute occlusion by overlays. Detect, segment and mask emoji.
-2. **Read the text.** OCR every text role by its routing, then bidi-normalize and identify the emoji. Fill in `Part.text`. Keep line boxes, so the text can be joined line by line in §7.6.
+2. **Read the text.** OCR every text role by its routing, then bidi-normalize and identify the emoji. Fill in `Part.text`. Keep line boxes, so the text can be joined line by line in §7.6. An element with no parts is read as one BODY part (messages) or one LABEL part (other kinds) over its `anchor_bbox`. A `DATE_SEPARATOR` whose label `parse_date_label` rejects gets `DATE_LABEL_UNPARSED`.
 3. **Call the grammar hooks:**
    - `parse_time` gives the time of day, the raw string, and OCR alternatives for digits that are easily confused.
    - `parse_date_label` gives a `DateLabel`. Relative labels are resolved now against this screenshot's anchor (§7.8); numeric labels wait for barrier 2.
    - `classify_system`, `describe_media`, `classify_quote` and `quote_sender_is_self`.
    - `APP_SPECIFIC` elements go to `interpret_app_specific`, and the elements it returns go through steps 1–3.
 4. **Image signatures** for every media picture and quote thumbnail (§7.10).
-5. **Fingerprint:**
-
-   | Element kind | Fingerprint fields |
-   |---|---|
-   | Message | side; normalized text (NFC, casefold, collapsed whitespace); emoji as glyph pHashes rather than code points; time and its alternatives; media kinds and signatures; quote text |
-   | Separator | resolved date (and time); the raw label is kept only as evidence |
+5. **Fingerprint.** The persisted fields are defined in [output-format §3.5](output-format.md#message) (`fingerprint`): sender (side until participants are mapped), kind, normalized text with the emoji removed, emoji as glyph pHashes, time with its OCR alternatives, and quote text. Media signatures are stored with the media. Separators are matched by **position and label** inside a batch (§7.6), and by resolved date and time across batches (§7.7).
 
 6. **Observation.** Emit one with provenance (screenshot, `bbox`, `anchor_bbox`, cut, occluded parts), per-field confidences and flags.
 
-Overlays produce no observation. The label of a `date_pill` overlay becomes **date evidence** for its screenshot. A chip with `pinned=None` is emitted as a *candidate* separator, and §7.6 decides what it is. Header titles and status clocks are read once per screenshot.
+Overlays produce no observation. Two things become **date evidence** for their screenshot: the label of a date chip with `pinned=True`, and an `Overlay.DATE_PILL` that a plugin emits on its own. A date chip with `pinned=None` is observed as a *candidate* separator, and §7.6 step 3 decides what it is. Header titles and status clocks are read once per screenshot.
 
 ### 7.6 Batch assembly (S4)
 
@@ -1015,7 +1033,7 @@ Overlays produce no observation. The label of a `date_pill` overlay becomes **da
 2. **Pairwise offsets:**
    - Compute row signatures: each row downsampled to 64 Lab columns and weighted by gradient.
    - Run **FFT-based masked normalized cross-correlation** over all vertical offsets d ∈ (−H, H) in one pass. This takes a few milliseconds per pair.
-   - **Prune pairs** that share no fingerprint, so most of the O(N²) pairs are never correlated.
+   - **Prune pairs** cheaply before correlating. A pair is skipped only if no observation in one is *compatible* (step 4) with an observation in the other, no two OCR lines are equal, **and** neither screenshot holds a cut-off fragment. Text comparison is cheap, so most of the O(N²) pairs are never correlated.
    - **Collapse near-identical screenshots** (same signature at d ≈ 0) before pairing. This handles duplicate or re-compressed copies.
    - **Accept** an offset when all of these hold:
      - the peak is ≥ 0.95;
@@ -1026,14 +1044,17 @@ Overlays produce no observation. The label of a `date_pill` overlay becomes **da
 3. **Placement.**
    - Accepted offsets form a graph. Each connected component goes on one y-axis (a spanning tree, with consistency checks on cycles).
    - The order of the input files does not matter (FR-IN-4).
-   - **Pinned chips.** A `pinned=None` chip that stays at the same *screen* y in overlapping screenshots, while the content behind it moves, is a pinned header and becomes date evidence. One that moves with the content is a real separator.
+   - **Pinned chips.** A `pinned=None` date chip is masked like an overlay when offsets are computed. It is decided as follows:
+     - **In overlapping screenshots:** if it stays at the same *screen* y while the content moves, it is the pinned pill and becomes date evidence. If it moves with the content, it is a real separator.
+     - **Without overlapping evidence:** if it covers part of a message (it intersects an element's `anchor_bbox`), it is the pinned pill. Otherwise it is kept as a separator with `origin: pill_candidate`.
+     - **On a later append:** a `pill_candidate` separator is removed (retired in `removed_items`) when a real separator with the same date appears above it in the same component, with no other date between them.
 4. **Compatibility** of two observations, field by field:
    - same kind and side;
    - text similarity ≥ 85 (rapidfuzz). For cut-off observations, a prefix, suffix or substring match;
    - emoji compared by glyph pHash, so an emoji in one observation and `U+FFFD` in another are compatible;
    - times equal, or equal through the OCR alternatives;
    - media signatures within the thresholds of §7.9;
-   - separators: the same resolved date and time.
+   - separators: at the same global position. Their labels may differ, as when "Today" becomes "Yesterday" across midnight; a resolved-date disagreement inside the cluster is the step 8 signal, not a reason to keep them apart.
 
    A missing quote or status in an observation marked `cut` on that side is compatible.
 5. **Clustering.** Observations of one element go into one cluster when, on the global y-axis, their `anchor_bbox` IoU is ≥ 0.5, or a cut observation lies inside a complete one, *and* they are compatible.
@@ -1060,10 +1081,17 @@ Overlays produce no observation. The label of a `date_pill` overlay becomes **da
    - A file whose minor version is newer than this program understands is refused with exit 6, unless `--force` is given.
    - An older minor version is upgraded in place, with `SCHEMA_UPGRADED`.
    - The models use `extra="allow"`, so fields this program does not know survive the round trip.
-2. **Check the chat.** Chat identity is the **app plus the set of participants**: their names, and which one is self.
+2. **Check the chat and map sides.** Chat identity is the **app plus the set of participants**: their names, and which one is self.
    - Platform, theme and UI direction are recorded **per source**. A batch from another device or UI language is accepted.
-   - The new batch's sides are mapped to participants. By default these are the stored participants: `--left/--right` are checked against them, and inference is skipped.
-   - On a mismatch, the resolver asks. Otherwise the run exits with code 5, unless `--force` is given, which records `APPEND_FORCED`.
+   - **Identity check.** The new batch's header titles are read as usual. One that does not match the stored non-self participant's name (fuzzy, ≥ 85) is a mismatch. `--left/--right` names, if given, must be among the stored names.
+   - **Side mapping, per batch**, first rule that applies:
+     1. `--left/--right` as given.
+     2. **Outgoing evidence** (ticks, "Sent") marks self's side.
+     3. **UI direction:** self is on the right in an `ltr` UI, and on the left in an `rtl` UI of an app that mirrors.
+     4. The stored first-batch mapping, with `SELF_SIDE_UNKNOWN`.
+
+     If evidence contradicts the mapping or the stored `is_self`, the flag is `SELF_SIDE_CONFLICT`. The mapping is recorded in `sources[].sides`.
+   - **On a mismatch,** the resolver asks. Otherwise the run exits with code 5, unless `--force` is given, which records `APPEND_FORCED`.
 3. **Skip known screenshots.** A source whose `sha256` is already recorded is skipped (FR-MRG-6).
 4. **Assemble** the new batch (§7.6).
 5. **Align** it with the existing items using semi-global alignment, so the batch may sit before, after or inside the transcript.
@@ -1071,7 +1099,7 @@ Overlays produce no observation. The label of a `date_pill` overlay becomes **da
    - **Strong anchors** are separators whose (date, time) key is unique on both sides.
    - Fingerprints compare normalized text plus keys that do not depend on OCR, so an OCR upgrade does not break idempotency.
 6. **Matched items keep their IDs** and gain provenance. If the new observation is clearly better (complete rather than cut, or higher confidence), its content replaces the old content, with a `revisions` entry.
-7. **New runs get IDs** under [output-format §4](output-format.md#4-message-ids).
+7. **New runs get IDs** under [output-format §4](output-format.md#4-message-ids). The rules there also cover a seam left by an earlier reorder (step 8): IDs are always unique; their order matches the array order everywhere except across such a seam.
 8. **Gaps.**
    - A `gap` item whose two sides are now joined is **removed**: its ID is retired and listed in `batches[].removed_items`.
    - If an append shows that two components were in the wrong order (possible only where `ORDER_UNCERTAIN` was set), the `items` array is reordered and the IDs are kept. The array order is authoritative ([output-format §4](output-format.md#4-message-ids) rule 1).
@@ -1115,17 +1143,33 @@ Overlays produce no observation. The label of a `date_pill` overlay becomes **da
 1. `spec.date_order`, if set.
 2. Otherwise the transcript's stored decision.
 3. Otherwise heuristics over every numeric label in the batch: a value > 12; dates must not decrease; the part that changes more often is the day.
-4. If still undecided, and both numbers are ≤ 12: `DATE_ORDER_AMBIGUOUS`, and the date is rendered with `?`.
+4. If still undecided, and both numbers are ≤ 12: `DATE_ORDER_AMBIGUOUS` on the transcript, and each affected separator gets `DATE_LOW_CONFIDENCE` (confidence 0.5), so it is rendered with `?`.
+
+**Barrier 2: UI language and participants** (FR-IN-3, FR-IN-6, FR-LAY-5):
+1. **UI language for each source.**
+   - The `--ui-lang` hint, if given.
+   - Otherwise the plugin's `ScreenLayout.ui_lang`.
+   - Otherwise inferred: the locale whose vocabulary matched the separator and system labels, falling back to `he` for a mirrored `rtl` UI and `en` otherwise.
+
+   It is recorded in `sources[].ui`, together with its source. The default hooks try every locale in `self.locales` in order, and order matters only for strings valid in more than one locale. In phase B the order comes from the hint, or from `spec.locales`. If the inferred language changes the order, the engine re-runs the grammar hooks for that source. They are pure functions of text, so this is cheap.
+2. **UI direction.** The plugin's `ui_direction` is compared across the batch's screenshots. A screenshot that disagrees with the majority is reparsed with the majority direction, unless it has its own outgoing evidence.
+3. **Participants** (first batch; for later batches see §7.7 step 2):
+   - Names come from `--left/--right`. Otherwise the other participant is the most common header title, and self is `Me`. The inferred names get `PARTICIPANTS_INFERRED`, and in interactive mode they are confirmed with the user.
+   - Self's side comes from outgoing evidence. Otherwise from the UI direction (right in `ltr`, left in a mirrored `rtl`), with `SELF_SIDE_UNKNOWN`.
+   - `--me` must agree with the outgoing evidence, otherwise `SELF_SIDE_CONFLICT`.
 
 **S6 propagation** over the final order:
-- A message takes its date from the nearest separator above it in the same component. **Propagation stops at `gap` items.**
-- Messages above the first separator of a screenshot use that screenshot's pinned-pill evidence (`date_source: floating_pill`). Otherwise the date is `null`, with `DATE_UNKNOWN`.
+- Each message's date comes from the first rule that applies:
+  1. The nearest separator above it **in the merged component**. Propagation never crosses a `gap` item.
+  2. For items with no separator above them in their component: the pinned-pill evidence of the screenshot(s) they appear in (`date_source: floating_pill`).
+  3. Otherwise `null`, with `DATE_UNKNOWN`.
+- Pill evidence that contradicts a separator-derived date sets `DATE_LOW_CONFIDENCE` on the affected messages.
 - A separator that carries a time gives following messages its date but not its time.
-- When `spec.shows_message_times` is true and a message has no readable TIME part: `TIME_UNREADABLE`.
+- When `spec.shows_message_times` is true and a message has no readable TIME part: `TIME_UNREADABLE`. A TIME read with a confidence below the record floor (§7.11) gets `TIME_LOW_CONFIDENCE` with that confidence.
 
 **Monotonic walk:**
 - **Separators:** (date, time of day) must be **non-decreasing**. Equal dates are normal for `separators="datetime"` apps and in the user's own example.
-  - Two date-only separators with the same date in one component are a duplicate signal: merge them, or flag `DUPLICATE_UNCERTAIN`.
+  - Two date-only separators with the same date at *different* positions in one component (messages between them) are never merged. The second gets `DUPLICATE_UNCERTAIN`. Observations of one separator at the *same* position were already merged in §7.6.
   - A decrease first tries other year inferences, and then OCR alternatives. Any change gets `DATE_LOW_CONFIDENCE` and is rendered with `?`. Otherwise the decrease is flagged `DATE_NON_MONOTONIC`.
   - An inferred year is never changed just to break a tie.
 - **Messages:** (date, time) must never decrease.
@@ -1149,11 +1193,17 @@ Overlays produce no observation. The label of a `date_pill` overlay becomes **da
 |---|---|---|
 | text | the quote has text that is not a media label | Truncated: `fuzz.ratio(q, cand[:len(q)+3])` (anchored at the start). Partial: `partial_ratio` (unanchored). Otherwise: `max(ratio, partial_ratio_alignment with start ≈ 0)`. |
 | thumbnail | the quote has a thumbnail and the candidate has a picture | Uses the **stored signatures** (§7.10), so candidates from earlier batches work without pixels: 0.6 × centre-square pHash similarity + 0.4 × HSV-histogram correlation |
+| media attributes | `classify_quote` returned a kind with attributes | Compares the quote's attributes with the candidate's `media.attrs`: `duration_s` for voice, video and audio (1.0 if equal, 0.5 if within 1 s, else 0); `file_name` for documents (fuzzy ratio); `label` for locations and contacts |
 | kind | `classify_quote` returned a kind | A gate: an incompatible kind scores the candidate 0 |
 | self/other | the quote's sender is readable | A gate: in 1:1 chats, `quote_sender_is_self` must match the candidate's sender. Names are not compared. |
 | recency | always | A small bonus (+0.02 per position, capped at +0.05) |
 
-**Score** = the weighted mean of the components that apply (text 0.6, thumbnail 0.4, renormalized to the ones present), after the gates, plus recency.
+**Score** = the weighted mean of the components that apply (text 0.6, thumbnail 0.4, media attributes 0.4, renormalized to the ones present), after the gates, plus recency.
+
+**Gates only.** If no scored component applies (e.g. a "Voice message" quote with no duration and no thumbnail), the gates still decide:
+- exactly one candidate passes the gates: **resolved** with `REPLY_LOW_CONFIDENCE`;
+- several pass: **ambiguous**, nearest first;
+- none pass: **unresolved**.
 
 | Condition | Result |
 |---|---|
@@ -1183,8 +1233,9 @@ Overlays produce no observation. The label of a `date_pill` overlay becomes **da
 
 - **Flags** form one `FlagCode` enum, shared by the engine, the JSON Schema and the renderer ([output-format §6](output-format.md#6-flag-codes)).
   - Plugins may only set `PluginFlag` values.
-  - `Element.confidence` below the threshold becomes `SIDE_UNCERTAIN`.
-  - A MEDIA part's confidence below the threshold becomes `MEDIA_KIND_UNCERTAIN`.
+  - **Recording vs display.** A *scored* flag is recorded in the JSON, with its confidence, whenever a field's confidence is below the **record floor** (`[flags] record_floor`, default 0.95). The **display threshold** (`--threshold`, default 0.80) only filters what the text view shows. So `render --threshold X` can show more or fewer markers for any X up to the record floor without re-parsing.
+  - `Element.confidence` below the record floor becomes `SIDE_UNCERTAIN`; a MEDIA part's confidence becomes `MEDIA_KIND_UNCERTAIN`; and likewise for OCR, time, emoji and date confidences.
+  - Some flags are **categorical** and always shown, whatever the threshold. `REPLY_LOW_CONFIDENCE` is one: it marks the 0.70–0.85 band, or a reply resolved by its gates alone. The others are listed in [output-format §6](output-format.md#6-flag-codes).
 - **Confidence rollup:** field confidences, then the item `confidence` (their minimum), then the transcript's `stats`.
 - **Custom themes and wallpapers** (NFR-ACC-3). The palette fit lowers element confidence: the ΔE between estimated and prior bubble colors, the flatness ratio, and the share of elements left unclassified. These conditions show up as flags rather than as confident wrong output.
 
@@ -1213,7 +1264,7 @@ class Resolver(Protocol):
 
 Answers are recorded with source `user` (FR-UNC-5).
 
-**No outgoing evidence.** If no screenshot shows which side is self (no ticks or status), self defaults to `right`. In interactive mode the user is asked; otherwise `SELF_SIDE_UNKNOWN` is set.
+**No outgoing evidence.** If no screenshot shows which side is self (no ticks or status), self's side follows the UI direction: right in an `ltr` UI, left in a mirrored `rtl` UI (§7.8, barrier 2). In interactive mode the user is asked; otherwise `SELF_SIDE_UNKNOWN` is set.
 
 ### 7.12 Output (S8)
 
@@ -1230,6 +1281,16 @@ Answers are recorded with source `user` (FR-UNC-5).
   - a JSON dump of each stage (layout, observations, offsets, placement, alignment);
   - the plugin's `ctx.debug` annotations.
 
+### 7.13 Renumbering (FR-MRG-8)
+
+`chatsocr renumber JSON` (API: `Transcript.renumber()`):
+1. Backs up the transcript, text view and media, as append does (§7.7 step 11).
+2. Gives messages the IDs `1…N` in array order, and system items `s1…sM`.
+3. Renames media files (`media/<id>-<n>.png`) to the new IDs.
+4. Rewrites every reference to the new IDs: `reply_to.id`, `reply_to.candidates`, `revisions`, `removed_items`.
+5. Increments `id_epoch`.
+6. Appends a `batches[]` entry of `"type": "renumber"` holding the full `id_map` (`{"old": "new"}`), so an agent holding old IDs can translate them.
+
 ---
 
 ## 8. Interfaces
@@ -1241,6 +1302,7 @@ Answers are recorded with source `user` (FR-UNC-5).
 | `chatsocr parse FILES…` | Main run (options below) |
 | `chatsocr detect FILES… [--explain]` | Every plugin's score and evidence (FR-DET-8) |
 | `chatsocr render JSON [--threshold X] [--isolate]` | Regenerate `transcript.txt`. `--isolate` writes a display copy with bidi isolates **to stdout only**, never to the file (FR-OUT-6/7). |
+| `chatsocr renumber JSON` | Compact IDs to 1…N, writing an ID map (§7.13, FR-MRG-8) |
 | `chatsocr plugin list` | Registry status (FR-CLI-4) |
 | `chatsocr plugin new --app A --platform P --themes light,dark` | Scaffold a plugin (FR-DEV-1) |
 | `chatsocr emoji sheet [--top N] \| calibrate --style S SHOTS… \| status` | Emoji templates (FR-EMO-3) |
@@ -1259,7 +1321,7 @@ Answers are recorded with source `user` (FR-UNC-5).
 | Hints | `--app A`, `--platform P`, `--theme T`, `--ui-lang he\|en` | Auto (§6.7) |
 | Output | `-o, --out DIR` | `./chatsocr-out`. A usage error (exit 2) together with `--append`. |
 | | `--overwrite` | Required to replace an existing `transcript.json` in a non-append run |
-| | `--no-media`, `--threshold X` (default 0.80), `--stdout text\|json\|none` (default none) | |
+| | `--no-media`, `--threshold X` (display threshold, default 0.80, at most the record floor), `--stdout text\|json\|none` (default none) | |
 | Append | `--append JSON`, `--force` | Output goes to the JSON's directory |
 | Time | `--captured-at [FILE=]ISO` (repeatable), `--now ISO` | FR-IN-7, NFR-DET-1 |
 | Interaction | `--interactive`, `--no-input`, `--review` | Interactive when stdin and stdout are terminals (FR-UNC-2) |
@@ -1287,6 +1349,7 @@ t = chatsocr.parse(
 )
 print(t.to_text())
 t2 = chatsocr.append(chatsocr.Transcript.load("out/transcript.json"), ["shots/c.png"])  # stored participants
+t3 = t2.renumber()                               # optional: IDs 1..N, id_map recorded, id_epoch + 1
 ```
 
 The library never prints and never prompts. Warnings are in `t.warnings`; logging goes through the `chatsocr` logger.
@@ -1300,11 +1363,12 @@ The library never prints and never prompts. Warnings are in `t.warnings`; loggin
 ```toml
 [detection]  accept = 0.6   margin = 0.15   floor = 0.25
 [display]    threshold = 0.80
+[flags]      record_floor = 0.95
 [reply]      accept = 0.85  low = 0.70  ambiguous = 0.60  margin = 0.08
 [merge]      ncc_peak = 0.95  ncc_margin = 0.03  min_overlap_em = 2.0  iou = 0.5  text_similarity = 85
 [anchor]     clock_tolerance_min = 2
 [ocr]        backend = "tesseract"  model = "fast"  secondary = "none"   # or "hebrew-onnx"
-[emoji]      min_confidence = 0.6
+[emoji]      min_confidence = 0.6   system = "noto"     # what the "system" emoji style means on this user's phone
 [plugins]    dirs = []
 [output]     media = true
 ```
@@ -1368,7 +1432,7 @@ Overlay images are for confirmation only (FR-DEV-2).
 fixtures/<plugin-id>/<case>/
   01.png 02.png …            screenshots, in any order
   case.toml                  captured_at, participants, ui_lang, expected variant, tolerances, notes
-  expected.txt               REQUIRED: item-level truth in the text-view format (typed by a person)
+  expected.txt               REQUIRED: item-level truth in the text-view format (typed by a person; the # header is optional)
   expected.json              OPTIONAL: element-level truth (kind, side, bbox, anchor_bbox, parts) using §6.5 conventions
 ```
 
@@ -1434,7 +1498,7 @@ Phase-1 built-in plugins must reach **Silver**. WhatsApp Android must reach **Go
 
 | Layer | What is tested | Where |
 |---|---|---|
-| Unit | Bidi hypothesis test (round trip through Chromium, including single-line L…R cases); line-break rule; date-label grammars (en/he); numeric date order; time parsing; ID allocation (property tests: order preserved, no collisions); reply scoring; fingerprint compatibility | `tests/unit` |
+| Unit | Bidi hypothesis test (round trip through Chromium, including single-line L…R cases); line-break rule; date-label grammars (en/he); numeric date order; time parsing; ID allocation (property tests over random appends, prepends, gap fills **and reorders**: IDs always unique; ID order equals array order except across reorder seams); renumber; reply scoring, including gate-only replies; fingerprint compatibility | `tests/unit` |
 | Component | OCR backends on synthetic crops (CER thresholds; versions and tessdata md5 pinned); prefix repair; emoji segmentation of runs and identification on other bubble colors; FFT offset search, including repeated "ok" bubbles and duplicate shots; fragment joining | `tests/component` |
 | Plugin | Conformance kit plus fixtures for every plugin | `tests/plugins` (synthetic), private repository (real) |
 | End-to-end | The acceptance scenarios in [requirements §10](requirements.md#10-acceptance-scenarios) | `tests/e2e` |
@@ -1535,12 +1599,12 @@ Phase 1 is delivered in milestones. Each ends with eval reports.
 
 | Milestone | Content | Exit criteria |
 |---|---|---|
-| **M0 Foundations** | Package skeleton; `plugin_api` 0.1 (IR, `StepwisePlugin`, `BubbleChatPlugin`, `SequentialPlugin`); imaging, metadata, scale; Tesseract backend + prefix repair; bidi normalizer; output models, renderer and parser; CLI skeleton and configuration; devtools (inspect blocks/ocr/probe, overlay, eval with `expected.txt`, scaffold); conformance kit; generic synthetic generator; out-of-tree sample plugins (including a `separators="datetime"` sample). Golden-set collection starts. | Unit and contract tests pass. Both sample plugins pass conformance. Scenarios 1b, 14 and 15 pass. |
-| **M1 WhatsApp Android (reference)** | Light and dark, English and Hebrew UI: layout, text, emoji (Noto + WhatsApp calibration), media, replies, dates; merging; append | Gold tier. Scenarios 1a, 2, 3a, 4–13, 16–20 pass. |
-| **M2 WhatsApp iOS + Desktop/Web** | The remaining WhatsApp variants; Apple emoji style; desktop scaling | Silver on all WhatsApp variants |
-| **M3 Telegram (agent pilot)** | Telegram Android, iOS (gradient bubbles) and Desktop, written by an AI agent following `AGENTS.md` | Silver; **zero engine changes** needed by the plugin; API gaps fixed in `plugin_api` 0.x; afterwards the API is reviewed for 1.0 |
+| **M0 Foundations** | Package skeleton; `plugin_api` 0.1 (IR, `StepwisePlugin`, `BubbleChatPlugin`, `SequentialPlugin`); imaging, metadata, scale; Tesseract backend + prefix repair; bidi normalizer; output models, renderer and parser; CLI skeleton and configuration; devtools (inspect blocks/ocr/probe, overlay, eval with `expected.txt`, scaffold); conformance kit with the detection fixture pack; generic synthetic generator; out-of-tree sample plugins (single-file and multi-file; one with `separators="datetime"`). Golden-set collection starts. | Unit and contract tests pass. Both sample plugins pass the conformance kit. Scenario 15. |
+| **M1 WhatsApp Android (reference)** | Light and dark, English and Hebrew UI. The full pipeline: layout, text, emoji (Noto + WhatsApp calibration), media, replies, dates, merging, append, renumber. | Gold tier. Scenarios 1a, 1b, 2, 3a, 4–14, 16, 17a, 18–20. |
+| **M2 WhatsApp iOS + Desktop/Web** | The remaining WhatsApp variants; Apple emoji style; desktop scaling | Silver on all WhatsApp variants. Scenario 17b. |
+| **M3 Telegram (agent pilot)** | Telegram Android, iOS (gradient bubbles) and Desktop, written by an AI agent following `AGENTS.md` | Silver. **Zero engine changes** needed by the plugin. API gaps are fixed in `plugin_api` 0.x, then the API is reviewed for 1.0. |
 | **M4 Hinge** | iOS and Android; the opening card as `x-hinge-like`; separators with times; "Sent" status | Silver on real samples |
-| **M5 Hardening** | Confidence calibration; performance; packaging on three operating systems; docs; optional second OCR backend; `plugin_api` 1.0 | All P1 Musts done; scenario 3b; NFR-ACC targets met or re-baselined with the user |
+| **M5 Hardening** | Confidence calibration; performance; packaging on three operating systems; docs; optional second OCR backend; `plugin_api` 1.0 with the first public release | All P1 Musts done. Scenario 3b. NFR-ACC targets met, or re-baselined with the user. |
 
 **Later:** P2 (group chats, reactions, markers including `deleted`, HEIC); P3 (GUI, more apps, screen recordings).
 
@@ -1551,31 +1615,36 @@ Phase 1 is delivered in milestones. Each ends with eval reports.
 | Requirement | Design |
 |---|---|
 | FR-IN-1…5, 8 | §5 (S0), §7.1, §7.7, §8.1 |
-| FR-IN-6 (`--ui-lang`) | §6.2 `Hints`, §6.7, §8.1, [output-format §3.4](output-format.md#34-sources-and-batches) `sources[].ui` |
+| FR-IN-6 (`--ui-lang`) | §6.2 `Hints`/`locales`, §6.3 `ui_direction`, §6.6, §6.7, §7.8 (barrier 2), [output-format §3.4](output-format.md#34-sources-and-batches) |
 | FR-IN-7 (capture time, `--now`) | §7.8, §8.1, §7.12 |
+| FR-IN-9 (HEIC, P2) | Deferred; a Pillow plugin (`pillow-heif`) in S0 |
 | FR-DET-1…8 | §6.7, §6.8, §8.1 |
 | FR-LAY-1…9 | §6.2–§6.5, §6.11, §7.2 (occlusion), §7.6 (fragments, pinned chips) |
+| FR-LAY-10, 11 (P2) | Deferred; roles `SENDER_NAME`, `AVATAR`, `REACTION`, `MARKER` are already in the IR (§6.2) |
 | FR-OCR-1…7 | §7.2, §7.3 |
+| FR-OCR-8 (P3) | Deferred |
 | FR-EMO-1…5 | §7.4 |
+| FR-EMO-6 (P2) | Deferred; §7.4 step 5 |
 | FR-MED-1…5 | §6.6, §7.10 |
 | FR-REP-1…5 | §7.9, §7.10, §7.7 step 10 |
 | FR-TIM-1…12 | §7.8, §7.1 |
-| FR-MRG-1…10 | §7.6, §7.7, [output-format §4](output-format.md#4-message-ids) |
+| FR-MRG-1…10 | §7.6, §7.7, §7.13, [output-format §4](output-format.md#4-message-ids) |
 | FR-OUT-1…10 | §7.12, §7.7, [output-format](output-format.md) |
 | FR-UNC-1…5 | §7.11, [output-format §6](output-format.md#6-flag-codes) |
 | FR-CLI-1…7, FR-API-1…3 | §8.1, §8.2 |
 | FR-CFG-1 | §8.3 |
 | FR-PLG-1…16 | §6 (all), §4.1 dependency rule, D13 |
-| FR-DEV-1…9 | §10 |
-| FR-GUI-1 (P3) | Not designed; the library API (§8.2) and the resolver (§7.11) are the integration points |
-| NFR-PRIV, NFR-SEC | §3, §12.4, §6.8 |
-| NFR-PERF | §12.1, §7.6 |
-| NFR-DET | §7.12, §12.2 |
-| NFR-PORT, NFR-LIC | §12.5 |
-| NFR-ROB | §12.3 |
-| NFR-EXT, NFR-MAINT | §4.1, §6.9, §11 |
-| NFR-OBS | §8.4, §7.12 (debug output) |
-| NFR-ACC-1…3 | §10.4, §11, §7.11 (palette fit), §13 |
+| FR-DEV-1…8 | §10 |
+| FR-DEV-9 (P2) | Deferred |
+| FR-GUI-1 (P3) | Deferred; the library API (§8.2) and the resolver (§7.11) are the integration points |
+| NFR-PRIV-1, 2; NFR-SEC-1 | §3, §12.4, §6.8, §7.4 (template storage) |
+| NFR-PERF-1, 2 | §12.1, §7.6 |
+| NFR-DET-1 | §7.12, §12.2 |
+| NFR-PORT-1, NFR-LIC-1 | §12.5 |
+| NFR-ROB-1 | §12.3 |
+| NFR-EXT-1, NFR-MAINT-1 | §4.1, §6.9, §11 |
+| NFR-OBS-1 | §8.4, §7.12 (debug output) |
+| NFR-ACC-1…3 | §10.4, §11, §7.11 (palette fit, record floor), §13 |
 | CON-1…6 | §2 (D1), §3, §12.5, §7.4 (emoji licenses), §7.1 (re-compressed input) |
 
 ---

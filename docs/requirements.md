@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Draft 2, revised after an independent review |
+| Status | Draft 3, revised after two independent review rounds; open questions in requirements §13 |
 | Date | 2026-11-24 |
 | Related | [High-level design](high-level-design.md) · [Output format](output-format.md) · [Background research](research/README.md) |
 
@@ -151,7 +151,7 @@ The proposed format ([output-format.md](output-format.md)) keeps the shape of th
 |---|---|---|---|
 | FR-IN-1 | Accept one or more image files and/or directories as one batch of one conversation. Formats: PNG, JPEG, WebP. | M | P1 |
 | FR-IN-2 | Accept participant names per side (`--left NAME --right NAME`) and, optionally, which side is the user's own (`--me left\|right`). In append mode, the transcript's stored participants are the default. | M | P1 |
-| FR-IN-3 | If names are missing, infer them. The other participant is the chat header's title; self is `Me`. Self's side comes from outgoing evidence (e.g. delivery ticks). <br>• Interactive: confirm with the user. <br>• Non-interactive: use the inferred names with `PARTICIPANTS_INFERRED`. <br>• With no outgoing evidence at all, self is assumed to be on the right, with `SELF_SIDE_UNKNOWN`. | M | P1 |
+| FR-IN-3 | If names are missing, infer them. The other participant is the chat header's title; self is `Me`. Self's side comes from outgoing evidence (e.g. delivery ticks). <br>• Interactive: confirm with the user. <br>• Non-interactive: use the inferred names with `PARTICIPANTS_INFERRED`. <br>• With no outgoing evidence at all, self's side follows the UI direction (right in a left-to-right UI, left in a mirrored right-to-left UI), with `SELF_SIDE_UNKNOWN`. | M | P1 |
 | FR-IN-4 | Screenshots may be given in any order. The program orders them by content (FR-MRG-1); file order and timestamps are only hints. | M | P1 |
 | FR-IN-5 | Append mode: process a new batch into an existing transcript (`--append transcript.json`). New messages may be newer than, older than, or in between existing ones. | M | P1 |
 | FR-IN-6 | Optional hints: `--app`, `--platform`, `--theme`, `--ui-lang he\|en`. The UI-language hint reaches the grammar of the plugin's labels and the mirroring decision, and is recorded with each source. | M | P1 |
@@ -195,7 +195,7 @@ The proposed format ([output-format.md](output-format.md)) keeps the shape of th
 | FR-OCR-1 | Recognize Hebrew, English and mixed Hebrew and English text, including digits, punctuation, URLs, phone numbers, currency signs (₪ $ €), and Hebrew prefix letters attached to Latin words (`ב-Zoom`). | M | P1 |
 | FR-OCR-2 | Output text in **logical Unicode order**, NFC, with no bidi control characters. Record each message's paragraph direction. If the direction cannot be decided from the pixels, flag `BIDI_AMBIGUOUS`. | M | P1 |
 | FR-OCR-3 | Join visually wrapped lines with a space, and keep line breaks the sender typed. When it cannot be decided which a break is, keep the newline and flag `LINEBREAK_UNCERTAIN`. | S | P1 |
-| FR-OCR-4 | Keep a confidence for each word, and a combined text confidence for each message. | M | P1 |
+| FR-OCR-4 | Keep a confidence for each word during processing. In the JSON, keep each message's text confidence and every low-confidence run of text. | M | P1 |
 | FR-OCR-5 | The OCR engine is a replaceable backend behind an interface. The default is a local engine that supports Hebrew and English. | M | P1 |
 | FR-OCR-6 | Repair known weak patterns by default; for example, Tesseract reads `ב-Zoom` as `Zoom-1`. An optional second backend may re-read lines that are low-confidence or still suspicious. | S | P1 |
 | FR-OCR-7 | Read times and date labels with settings for that role: a character whitelist, single-line mode, and checking against a pattern. | M | P1 |
@@ -207,7 +207,7 @@ The proposed format ([output-format.md](output-format.md)) keeps the shape of th
 |---|---|---|---|
 | FR-EMO-1 | Detect emoji inside text lines, including runs of adjacent emoji (😂😂😂), and emoji-only "jumbo" messages. They must never appear as OCR junk. | M | P1 |
 | FR-EMO-2 | Identify each emoji as its Unicode sequence by matching against templates of the **emoji style** the variant uses (WhatsApp, Apple, Google Noto, Samsung, …), on any bubble color, with a confidence. | M | P1 |
-| FR-EMO-3 | Get templates without redistributing proprietary artwork: <br>(a) bundle Noto Emoji (OFL/Apache); <br>(b) render emoji fonts installed on the user's machine at runtime (e.g. Apple Color Emoji on macOS); <br>(c) **calibrate per style**: the user screenshots a generated emoji sheet in *any* app that renders that style, and the tool builds the templates. <br>Templates stay in the user's local cache. | M | P1 |
+| FR-EMO-3 | Get templates without redistributing proprietary artwork: <br>(a) bundle Noto Emoji (OFL/Apache); <br>(b) render emoji fonts installed on the user's machine at runtime (e.g. Apple Color Emoji on macOS); <br>(c) **calibrate per style**: the user screenshots a generated emoji sheet in *any* app that renders that style, and the tool builds the templates. <br>All templates stay on the machine. Calibrated ones live in the user data directory and survive `cache clear`. The style `system` ("the phone's own emoji") is mapped to a concrete style in the configuration. | M | P1 |
 | FR-EMO-4 | An emoji that cannot be identified confidently is written as U+FFFD (`�`) and flagged `EMOJI_UNIDENTIFIED`. The JSON keeps the best guesses, the confidence and the box. | M | P1 |
 | FR-EMO-5 | Skin-tone and ZWJ sequences are handled on a best-effort basis. Uncertain cases fall back to the component emoji with `EMOJI_LOW_CONFIDENCE`. | S | P1 |
 | FR-EMO-6 | Remember emoji the user labelled in interactive mode. | C | P2 |
@@ -227,7 +227,7 @@ The proposed format ([output-format.md](output-format.md)) keeps the shape of th
 | ID | Requirement | Pri | Ph |
 |---|---|---|---|
 | FR-REP-1 | Detect reply quotes, inside the bubble or as a separate block above it. Extract the quoted sender, quoted text (and whether it was truncated or partial), quoted media label, and thumbnail. | M | P1 |
-| FR-REP-2 | Find the replied-to message among earlier messages, including those from earlier appended batches. Matching combines: <br>• quoted text (fuzzy, truncation-aware); <br>• thumbnail similarity, from **stored image signatures**, so no pixels are needed; <br>• compatible media kind; <br>• in 1:1 chats, a self/other check of the quoted sender; <br>• a small preference for recent messages. | M | P1 |
+| FR-REP-2 | Find the replied-to message among earlier messages, including those from earlier appended batches. Matching combines: <br>• quoted text (fuzzy, truncation-aware); <br>• thumbnail similarity, from **stored image signatures**, so no pixels are needed; <br>• compatible media kind; <br>• in 1:1 chats, a self/other check of the quoted sender; <br>• the quoted media details (duration of a voice note, file name of a document); <br>• a small preference for recent messages. <br>A quote that matches only by kind and sender (e.g. "Voice message" with no duration) resolves when exactly one candidate fits. | M | P1 |
 | FR-REP-3 | Each reply is in one state: <br>**resolved:** an ID and a confidence; `REPLY_LOW_CONFIDENCE` if the confidence is in the lower band. <br>**ambiguous:** ranked candidates, `REPLY_AMBIGUOUS`. <br>**unresolved:** `REPLY_UNRESOLVED`, the target is probably outside the captured range. <br>The quote's content is kept in every state. | M | P1 |
 | FR-REP-4 | Keep the quoted snippet separate from the message's own text. | M | P1 |
 | FR-REP-5 | In append mode, retry unresolved and ambiguous replies against newly added messages. Resolved replies are never changed. | S | P1 |
@@ -236,7 +236,7 @@ The proposed format ([output-format.md](output-format.md)) keeps the shape of th
 
 | ID | Requirement | Pri | Ph |
 |---|---|---|---|
-| FR-TIM-1 | Date separators become system items with a resolved absolute date, keeping the raw label. A pinned date pill only supplies date evidence for the messages above the first separator on that screenshot. | M | P1 |
+| FR-TIM-1 | Date separators become system items with a resolved absolute date, keeping the raw label. A pinned date pill is never a separator. It only dates messages that have no separator above them in their part of the transcript (between gaps). | M | P1 |
 | FR-TIM-2 | When the app shows a time for each message, attach it to the message. The text view shows it in a fixed place, distinguishable from the message text. | M | P1 |
 | FR-TIM-3 | Resolve relative labels against the anchor of **the screenshot that shows the label**: <br>• Today/היום = the anchor date; <br>• Yesterday/אתמול = the day before; <br>• a weekday name (English or Hebrew, full or abbreviated) = the most recent such day **strictly before** the anchor date. | M | P1 |
 | FR-TIM-4 | Take the anchor for each screenshot from the first source available: <br>1. user override (FR-IN-7) <br>2. EXIF `DateTimeOriginal` (with offset) <br>3. the file-name timestamp <br>4. XMP creation date <br>5. file modification time (`ANCHOR_LOW_CONFIDENCE`) <br>6. the run's "now" (`ANCHOR_FALLBACK_NOW`) <br>Cross-check against the status-bar clock when it is readable (`ANCHOR_CONFLICT`). Record the source and confidence. | M | P1 |
@@ -259,7 +259,7 @@ The proposed format ([output-format.md](output-format.md)) keeps the shape of th
 | FR-MRG-4 | When a message is seen more than once, take each field from the best observation: complete and unoccluded first, then higher confidence. Keep every observation in its provenance. | M | P1 |
 | FR-MRG-5 | **Stable IDs:** existing message IDs never change. <br>• New messages after the end get the next integers. <br>• Messages before or between existing ones get **dotted IDs** that sort into place (`4.1`, `0.2`). <br>• The order of the `items` array is authoritative. <br>Rules: [output-format §4](output-format.md#4-message-ids). | M | P1 |
 | FR-MRG-6 | Appending is idempotent: appending a batch that is already included adds nothing. | M | P1 |
-| FR-MRG-7 | **Chat identity is the app plus the set of participants**, not the platform, theme or side. A batch of the same chat from another device or UI language can be appended. On a mismatch: <br>• Interactive: ask the user. <br>• Non-interactive: refuse with exit code 5, unless `--force` is given. | S | P1 |
+| FR-MRG-7 | **Chat identity is the app plus the set of participants**, not the platform, theme or side. A batch of the same chat from another device or UI language can be appended. <br>• **Identity check:** the new batch's chat header must match the stored other participant. <br>• **Side mapping per batch:** `--left/--right`, else outgoing evidence, else UI direction, else the stored mapping (`SELF_SIDE_UNKNOWN`). <br>On a mismatch: <br>• Interactive: ask the user. <br>• Non-interactive: refuse with exit code 5, unless `--force` is given. | S | P1 |
 | FR-MRG-8 | A `renumber` command compacts IDs to 1…N. It writes an ID map and increments `id_epoch`. | S | P1 |
 | FR-MRG-9 | A gap that a later append fills is removed, and its ID is recorded as removed. | M | P1 |
 | FR-MRG-10 | When an append shows that two pieces separated by a gap were in the wrong order, reorder the items and keep their IDs. | S | P1 |
@@ -283,7 +283,7 @@ The proposed format ([output-format.md](output-format.md)) keeps the shape of th
 
 | ID | Requirement | Pri | Ph |
 |---|---|---|---|
-| FR-UNC-1 | Every uncertain decision adds a flag (code, field, confidence) to the item it affects or to the transcript. The text view shows compact markers for flags below a configurable threshold (default 0.80). | M | P1 |
+| FR-UNC-1 | Every uncertain decision adds a flag (code, field, confidence) to the item it affects or to the transcript. <br>• Scored flags are recorded below a **record floor** (default 0.95). <br>• The text view shows them below a **display threshold** (default 0.80) that `render --threshold` can change without re-processing. <br>• Categorical flags are always shown. | M | P1 |
 | FR-UNC-2 | The CLI is interactive when stdin and stdout are terminals, unless `--no-input` is given; `--interactive` forces it. The library never prompts; it calls an optional resolver (FR-API-3). Questions are asked only from the main process. | M | P1 |
 | FR-UNC-3 | Non-interactive runs never block. They always finish with output (with flags) or with a documented exit code. | M | P1 |
 | FR-UNC-4 | Interactive questions cover at least: <br>• choosing the app when detection is ambiguous or fails; <br>• confirming inferred participants; <br>• an append mismatch. <br>An optional review (`--review`) asks about low-confidence replies, emoji and times. | M (review: S) | P1 |
@@ -311,15 +311,15 @@ The proposed format ([output-format.md](output-format.md)) keeps the shape of th
 | ID | Requirement | Pri | Ph |
 |---|---|---|---|
 | FR-PLG-1 | **Supporting a new app, platform, theme or UI epoch needs only a new plugin module (plus fixtures and tests). The engine is not changed.** A CI test checks this by loading plugins from outside the source tree. | M | P1 |
-| FR-PLG-2 | A plugin class declares the variants it supports, and may cover several. Each screenshot is routed to a class that claims its detected variant and recognized it, in this order: <br>1. the more specific class (fewer variants); <br>2. local over installed over built-in; <br>3. higher declared priority. <br>A class that did not recognize the screenshot is never chosen. | M | P1 |
+| FR-PLG-2 | A plugin class declares the variants it supports, and may cover several. Each screenshot is routed to a class that claims its detected variant and recognized it, in this order: <br>1. the more specific class (fewer variants); <br>2. local over installed over built-in; <br>3. higher declared priority. <br>A class that did not recognize the screenshot is not chosen when another class did. If none did, or the user forced the app, a **fallback route** picks the most specific class for the decided app and platform, flagged `DETECTION_LOW_CONFIDENCE` or `DETECTION_MISMATCH`. | M | P1 |
 | FR-PLG-3 | Each plugin has a cheap `detect` method that returns a confidence, the matched variant and its evidence. | M | P1 |
 | FR-PLG-4 | **Plugins do layout and the app's own grammar only.** <br>• Layout: chrome, overlays, and elements with their parts and roles. <br>• Grammar: reading the app's time, date-label and system strings, and its media kinds. <br>The engine does everything that every app shares: OCR, text direction, emoji, merging, IDs, times, replies, crops and output. | M | P1 |
-| FR-PLG-5 | The plugin API offers three ways to write a plugin: <br>(a) a whole-screen `parse_screen`; <br>(b) a **step-by-step** base class whose steps can be overridden one at a time, with a declarative base that implements every step for typical bubble layouts; <br>(c) a **sequential** base class, the model the user proposed. Here the author writes only `detect` and `crop_next_element(ctx, area, y, overlays)`, and inherits chrome, overlays, direction and parts. | M | P1 |
+| FR-PLG-5 | The plugin API offers three ways to write a plugin: <br>(a) a whole-screen `parse_screen`; <br>(b) a **step-by-step** base class whose steps can be overridden one at a time, with a declarative base that implements every step for typical bubble layouts; <br>(c) a **sequential** base class, the model the user proposed. Here the author writes only `detect` and `crop_next_element(ctx, area, y, overlays)`, declares the header and composer heights, and inherits chrome, overlays, direction and parts. | M | P1 |
 | FR-PLG-6 | The engine provides a documented set of computer-vision helpers, so that typical plugin code stays short. They cover: <br>• color clustering and masks <br>• flat and shaded regions (bubbles) <br>• centered chips and centered text lines <br>• textured rectangles and color blobs <br>• keyboard detection <br>• small glyph clusters (times, ticks) <br>• quote bars <br>• icon matching <br>• row profiles <br>• local background color <br>• dp/em conversion | M | P1 |
 | FR-PLG-7 | Plugin geometry is given in dp or em. The engine estimates the scale of each screenshot from measured text, so phones and desktop scaling of 100–200% work. A plugin may override the estimate. | M | P1 |
 | FR-PLG-8 | Theme colors are data: a palette for each variant, optionally in a TOML file next to the plugin, which a tool can regenerate from fixtures. Gradient colors are supported. | S | P1 |
 | FR-PLG-9 | Discovery sources: <br>• the package's built-in plugins; <br>• installed packages, through an entry-point group; <br>• `--plugin-dir` directories; <br>• the user's plugin directory. <br>Plugin directories may contain multi-file packages. | M | P1 |
-| FR-PLG-10 | Each plugin declares `api_version`, and incompatible plugins are rejected with a clear message. The API is **provisional (0.x) until the M3 agent pilot ends**; after that, semantic versioning and deprecation warnings apply. | M | P1 |
+| FR-PLG-10 | Each plugin declares `api_version`, and incompatible plugins are rejected with a clear message. The API is **provisional (0.x) through M5**. It is reviewed after the M3 agent pilot and released as 1.0 with the first public release, after which semantic versioning and deprecation warnings apply. | M | P1 |
 | FR-PLG-11 | A plugin may declare optional dependencies and model files. If they are missing, the plugin is listed as unavailable with the reason, and nothing crashes. | S | P1 |
 | FR-PLG-12 | Importing a plugin is cheap. `detect` stays within budget (default 50 ms for each screenshot and plugin, measured on a downscaled image). The conformance kit enforces both. | S | P1 |
 | FR-PLG-13 | App-specific elements, such as Hinge's "liked your prompt" card, are turned by the plugin into ordinary message or system elements. These go through normal extraction (OCR, crops) without engine changes. | M | P1 |
@@ -369,7 +369,7 @@ The proposed format ([output-format.md](output-format.md)) keeps the shape of th
 
 Every scenario is an automated test on fixtures. The milestone that must pass each one is in [HLD §14](high-level-design.md#14-roadmap).
 
-1. **1a. User's conversation in WhatsApp.** A WhatsApp Android screenshot of the user's example conversation produces exactly:
+1. **1a. User's conversation in WhatsApp.** A WhatsApp Android screenshot of the user's example conversation produces these item lines, after the `#` header:
 
    ```
    0. System: [date 2026-11-24 Tue "Today"]
@@ -380,7 +380,10 @@ Every scenario is an automated test on fixtures. The milestone that must pass ea
    ```
 
    **1b. User's example shape.** A synthetic screenshot from the sample plugin with `separators="datetime"` (no per-message times) produces the six lines of [output-format §2.1](output-format.md#21-example), second block. Two separators on the same day raise no flag.
-2. **Weekday resolution.** A screenshot anchored on Tuesday 2026-11-24 shows the separators "Sunday" and "יום ראשון", which both resolve to 2026-11-22. With the metadata removed and no `--captured-at`, the run's `now` is used, `ANCHOR_FALLBACK_NOW` is set, and the dates are shown with `?`.
+2. **Weekday resolution.**
+   - An English-UI screenshot anchored on Tuesday 2026-11-24 shows the separator "Sunday", which resolves to 2026-11-22.
+   - A Hebrew-UI screenshot anchored on Wednesday 2026-11-25 shows "יום ראשון", which also resolves to 2026-11-22.
+   - The same image passed to the library as bytes (so with no metadata and no file time), with `now` pinned, falls back to that `now`: `ANCHOR_FALLBACK_NOW` is set and the dates are shown with `?`.
 3. **Mixed direction.**
    - **3a.** The phrases "I bought the חומוס you wanted" and "נפגשים מחר 18:30 at Dizengoff" come out in logical order, matching the ground truth. A single-line text whose direction is truly ambiguous either matches or is flagged `BIDI_AMBIGUOUS`.
    - **3b.** "נפגש ב-Zoom בשעה 18:30 מחר" is read correctly (the prefix repair, or the optional second backend).
@@ -391,7 +394,10 @@ Every scenario is an automated test on fixtures. The milestone that must pass ea
    - Batch A, then batch B: newer messages, older messages (from scrolling up), and messages that fill A's gap.
    - Existing IDs do not change. Newer messages continue the numbering. Older ones get `0.x`, and gap-filling ones get `P.x`. The filled gap is removed.
    - Appending B again changes nothing.
-8. **Reply to an image.** A reply quoting an image (thumbnail plus "Photo") resolves to that image through the thumbnail signature.
+8. **Reply to media.**
+   - A reply quoting an image (thumbnail plus "Photo") resolves to that image through the thumbnail signature.
+   - A reply quoting "Voice message (0:42)" resolves to the only 0:42 voice note.
+   - A reply quoting a document by file name resolves to that document.
 9. **Unresolved reply.** A reply quoting a message outside the captured range is `unresolved` and keeps the quote text.
 10. **Emoji.** "❤️😂😂😂" in a text line gives exactly those code points and no OCR junk, on incoming and outgoing bubble colors. An emoji with no template gives `�` and `EMOJI_UNIDENTIFIED`.
 11. **Media.** A voice note gives `<voice 0:42>`, a document gives `<document "report.pdf" …>`, a link preview gives `<link "…">`, and an album of 3 images gives three `<image …>` tags.
@@ -400,7 +406,9 @@ Every scenario is an automated test on fixtures. The milestone that must pass ea
 14. **Out-of-tree plugins.** Two out-of-tree plugins are discovered, pass the conformance kit and parse their fixtures, without engine changes: a single-file plugin installed through an entry point, and a multi-file plugin package loaded with `--plugin-dir`.
 15. **Offline.** The whole suite passes with sockets blocked.
 16. **Determinism.** The same batch run twice with `--now` pinned gives identical JSON, apart from `processed_at`.
-17. **Append across devices.** A transcript from WhatsApp Android with a Hebrew UI gets a batch from WhatsApp Web with an English UI appended, with sides given per batch. Overlapping messages are matched, not duplicated.
+17. **Append across UI languages and devices.** Overlapping messages are matched, not duplicated, and no sender is swapped.
+    - **17a:** a transcript from WhatsApp Android with a Hebrew UI (mirrored) gets a WhatsApp Android batch with an English UI appended, **with no `--left/--right`**. Sides are mapped from outgoing evidence and UI direction.
+    - **17b:** the same, with the second batch from WhatsApp Web.
 18. **Tall message.** A message taller than the screen, seen cut off across three screenshots, becomes one complete message with no `PARTIAL_MESSAGE`.
 19. **Reply across batches.** A reply in batch B to an image from batch A, run with `--no-media`, resolves through the stored signatures.
 20. **Pinned date pill.** Scrolled screenshots with the pinned date pill visible produce no extra separators. Messages dated from the pill get a date context line.
@@ -431,7 +439,7 @@ No public, labelled dataset of chat screenshots exists ([research](research/prio
 Each question has a working default that the documents already use.
 
 1. **Text-view format.** Do you approve the proposed form of your example ([output-format §2.1](output-format.md#21-example))?
-   - Dates are written as `0. System: [date 2026-11-24T08:33 Tue "Today 8:33 AM"]` rather than `0. System: 2026-11-24T08:33`. The wrapper keeps dates apart from other system text, and the weekday and raw label are added only when the date was inferred.
+   - Dates are written as `0. System: [date 2026-11-24T08:33 Tue "Today 8:33 AM"]` rather than `0. System: 2026-11-24T08:33`. The wrapper keeps dates apart from other system text. The weekday is always added; the raw label only when the date was inferred.
    - Images carry their crop path: `<image media/3-1.png>`.
    - A per-message time slot is added for apps like WhatsApp: `1. 08:33 Bar: …`.
    - There are comment lines starting with `#` at the top, and uncertainty tags such as `[?text 0.58]`.

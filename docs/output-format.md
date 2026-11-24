@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Draft 2, revised after an independent review |
+| Status | Draft 3, revised after two independent review rounds; open questions in requirements §13 |
 | Date | 2026-11-24 |
 | Versions specified | JSON `schema_version` 1.0.0 · text view `chatsocr-text/1` |
 | Related | [Requirements](requirements.md) (FR-OUT, FR-MRG-5, FR-UNC) · [High-level design](high-level-design.md) |
@@ -50,7 +50,7 @@ A WhatsApp chat (per-message times, one date separator per day):
   and a second line
 ```
 
-The user's original example comes from an app that shows times **only in separators**. Rendered by ChatsOCR, it keeps the same shape:
+The user's original example comes from an app that shows times **only in separators**. Rendered by ChatsOCR, it keeps the same shape (item lines only; the `#` header is left out here):
 
 ```
 0. System: [date 2026-11-24T08:33 Tue "Today 8:33 AM"]
@@ -64,12 +64,14 @@ The user's original example comes from an app that shows times **only in separat
 It differs from the user's example in three deliberate ways, and the user still needs to approve them ([requirements §13](requirements.md#13-open-questions-for-the-user) Q1):
 
 1. **Dates are wrapped as `[date …]`.** This keeps date lines distinguishable from other system text.
-2. **The weekday and the raw label are added.** The raw label appears only when the date was *inferred*, as here from "Today".
+2. **The weekday is always added.** The raw label is added only when the date was *inferred*, as here from "Today".
 3. **Images carry the link to their crop.** With `--no-media` the tag is exactly `<image>`.
 
 ### 2.2 Line rules
 
-1. **Header.** Lines starting with `#` are comments with metadata. The first line is always `# chatsocr-text/<major>`. A reader may ignore every header line. `# warnings: …` lists transcript-level flags, if there are any.
+1. **Header.** Lines starting with `#` are comments with metadata.
+   - ChatsOCR always writes `# chatsocr-text/<major>` as the first line, and `# warnings: …` lists transcript-level flags, if there are any.
+   - A reader may ignore every header line, and must accept a file without a header (treat it as `chatsocr-text/1`). Hand-typed `expected.txt` fixtures usually have none.
 2. **One item per line.**
    - A **message** line starts with its ID: `5.`, or `4.1.` for a dotted ID (§4).
    - A **system** line starts with `0. System:`. System items cannot be referred to from the text view; their IDs live in the JSON.
@@ -106,8 +108,9 @@ It differs from the user's example in three deliberate ways, and the user still 
 | `0. System: [date 2026-11-24 Tue from=pill]` | **Date context line.** Not a separator in the chat. It tells the reader which date applies to the messages that follow (rule 4). |
 | `0. System: [gap]` | Messages may be missing here: two screenshots did not overlap (FR-MRG-3). Dates are never carried across it. |
 | `0. System: TEXT` | Any other system message (encryption notice, "You matched", …). The body rules apply. |
+| `0. System: [?kind] TEXT` | A centered element the plugin could not classify (`ELEMENT_UNRECOGNIZED`); TEXT is whatever OCR read in it |
 
-Flag tags may follow a date or gap tag (`0. System: [date 2026-11-24 Tue] [?dup]`), or come before system text.
+Flag tags, and tags unknown to the reader, may follow a date or gap tag (`0. System: [date 2026-11-24 Tue] [?dup]`), or come before system text. A `0. System:` line is always a system line, never message `0`.
 
 ### 2.4 Tags
 
@@ -119,24 +122,25 @@ Flag tags may follow a date or gap tag (`0. System: [date 2026-11-24 Tue] [?dup]
 [?sender 0.61]   the side/sender assignment is uncertain
 [?media 0.70]    the media kind is uncertain
 [?time]          the app shows a time, but it could not be read
-[?date]          the message's date is unknown
+[?date]          the message's date is unknown (with a score: its date is uncertain)
 [?partial]       only a cut-off part of the message was ever visible
 [?bidi]          text direction was ambiguous, so the word order may be wrong
 [?dup]           may be a duplicate of a nearby message, kept to be safe
 [?order]         its position relative to its neighbours is uncertain
+[?kind]          on a system line: the element could not be classified
 ```
 
 - Several fields can share one tag: `[?text,emoji 0.55]`.
-- A flag that has a score is shown only when its confidence is below the display threshold (default 0.80, `--threshold`).
-- Flags without a score (unidentified, unreadable, partial, unknown) are always shown.
+- **Scored** flags are recorded in the JSON whenever the field's confidence is below the record floor (0.95). They are *shown* only when the confidence is also below the display threshold (default 0.80, `--threshold`).
+- **Categorical** flags are always shown (§6 says which are which).
 
-**Reply tags.** The quoted sender, media kind and snippet are shown whenever the target is not a confident ID:
+**Reply tags.** The ambiguous and unresolved forms also show the quoted sender, media kind and snippet, when known. The resolved forms do not.
 
 | Form | Meaning |
 |---|---|
 | `[reply: 5]` | Replies to message 5, resolved with high confidence |
-| `[reply: 5?]` | Resolved to message 5 with low confidence |
-| `[reply: ~5\|3 Bar "how are"]` | **Ambiguous.** Candidates, best first. |
+| `[reply: 5?]` | Resolved to message 5 with low confidence (`REPLY_LOW_CONFIDENCE`, always shown) |
+| `[reply: ~5\|3 Bar "how are"]` | **Ambiguous.** Candidates scoring at least the ambiguity threshold (0.60), best first, at most 3 |
 | `[reply: ? Bar "see you at 8 at the"…]` | **Unresolved.** The target is probably outside the transcript. |
 | `[reply: ? Bar <image>]` | Unresolved reply to an image |
 
@@ -148,6 +152,18 @@ Flag tags may follow a date or gap tag (`0. System: [date 2026-11-24 Tue] [?dup]
 - An attribute is positional, or `key=value`.
 - A value is a bare token, or a JSON-escaped string in quotes. A value containing a space, `"`, `<`, `>`, `[`, `]` or `=` must be quoted.
 - Core kinds write their attributes in the order below and leave out unknown ones.
+- **Every positional value has its own shape, so a reader can map it back to its JSON key even when others are left out:**
+
+| Shape | Maps to |
+|---|---|
+| a path starting `media/` | `file` |
+| `m:ss` or `h:mm:ss` | `duration_s` |
+| a size such as `2.1MB` (`\d+(\.\d+)?(B\|KB\|MB\|GB)`) | `size_text` |
+| a single emoji | `emoji` |
+| one of the keywords `missed`, `voice`, `video`, `image` | the flag or kind it names |
+| a **quoted** string | the kind's text attribute: `file_name` (document), `title` (audio), `url` (link), `label` (location), `name` (contact), `question` (poll) |
+
+  Text attributes are always quoted, even when they contain no spaces.
 
 | Kind | Form | Example |
 |---|---|---|
@@ -157,7 +173,7 @@ Flag tags may follow a date or gap tag (`0. System: [date 2026-11-24 Tue] [?dup]
 | `sticker` | `<sticker [emoji] [path]>` | `<sticker 😂 media/4-1.png>` |
 | `voice` | `<voice [m:ss]>` | `<voice 0:42>` |
 | `audio` | `<audio [m:ss] ["title"]>` | `<audio 3:05 "song.mp3">` |
-| `document` | `<document ["name"] [size] [pages=N]>` | `<document "report.pdf" 2.1MB pages=3>` |
+| `document` | `<document ["file name"] [size] [pages=N]>` | `<document "report.pdf" 2.1MB pages=3>` |
 | `link` | `<link "url" [title="…"]>` (a link-preview card) | `<link "https://x.com/a" title="Example">` |
 | `location` | `<location ["label"]>` | `<location "Dizengoff Center">` |
 | `contact` | `<contact ["name"]>` | `<contact "Dana">` |
@@ -166,7 +182,7 @@ Flag tags may follow a date or gap tag (`0. System: [date 2026-11-24 Tue] [?dup]
 | `view-once` | `<view-once [image\|video\|voice]>` | `<view-once image>` |
 | `unknown` | `<unknown>`: a media element the plugin could not classify | `<unknown>` |
 | `deleted` | `<deleted>` (**P2**). In P1 a deleted message's visible text ("This message was deleted") is output as ordinary text. | `<deleted>` |
-| `x-…` | Defined by a plugin (FR-MED-2). **Every attribute is `key=value`, in the order the plugin declares.** The declarations are stored in the JSON (`chat.media_kinds`), so `render` works without the plugin. | `<x-hinge-like on=prompt prompt="My simple pleasures" answer="coffee at sunrise">` |
+| `x-…` | Defined by a plugin (FR-MED-2). **Every attribute is `key=value`.** For a kind with a picture, `file=` comes first; the rest follow in the order the plugin declares. The declarations are stored in the JSON (`chat.media_kinds`), so `render` works without the plugin. | `<x-hinge-like file=media/1-1.png on=prompt prompt="My simple pleasures" answer="coffee at sunrise">` |
 
 A message with several media items (an album) has several media tags in a row.
 
@@ -189,24 +205,25 @@ hhmm     = 2 * digit , ":" , 2 * digit ;
 score    = digit , "." , 2 * digit ;
 
 (* ---- structure ---- *)
-view     = header , { item } ;
+view     = [ header ] , { item } ;                            (* ChatsOCR always writes the header *)
 header   = "# chatsocr-text/" , int , NL , { "#" , { char } , NL } ;
 item     = ( sysline | msgline ) , NL , { contline } ;
 contline = ( "  " , { char } | (* empty text line *) ) , NL ;
 
-sysline  = "0. System: " , ( ( datetag | gaptag ) , { SP , flagtag }
-                           | { flagtag , SP } , body ) ;
+sysline  = "0. System: " , ( ( datetag | gaptag ) , { SP , systag }
+                           | { systag , SP } , body ) ;
+systag   = flagtag | othertag ;
 datetag  = "[date " , ( date , [ "T" , hhmm ] , [ "?" ] , SP , wkday | "?" ) ,
            [ SP , qstr ] , [ SP , "from=" , token ] , "]" ;
 gaptag   = "[gap]" ;
 
 msgline  = msgid , ". " , [ hhmm , [ "?" ] , SP ] , label , ": " , ( tags , [ SP , body ] | body ) ;
-msgid    = int , { "." , int } ;                               (* never exactly "0" *)
+msgid    = ( int - "0" ) | int , "." , int , { "." , int } ;  (* "0" alone is reserved for system lines *)
 
 tags     = tag , { SP , tag } ;
 tag      = flagtag | replytag | mediatag | othertag ;          (* written in this order *)
 flagtag  = "[?" , field , { "," , field } , [ SP , score ] , "]" ;
-field    = "text" | "emoji" | "sender" | "media" | "time" | "date" | "partial" | "bidi" | "dup" | "order" ;
+field    = "text" | "emoji" | "sender" | "media" | "time" | "date" | "partial" | "bidi" | "dup" | "order" | "kind" ;
 replytag = "[reply: " , target , [ SP , label ] , [ SP , "<" , kind , ">" ] , [ SP , qstr , [ "…" ] ] , "]" ;
 target   = msgid , [ "?" ] | "~" , msgid , { "|" , msgid } | "?" ;
 mediatag = "<" , kind , { SP , attr } , ">" ;
@@ -219,7 +236,12 @@ body     = ( "\" , char | char - ( "[" | "<" | "\" | SP ) ) , { char } ;
 ```
 
 **Disambiguation:**
-- A tag is recognized by its prefix: `[?` is a flag, `[reply: ` a reply, `<` followed by a known kind or `x-` a media tag. Any other bracketed tag is an `othertag`.
+- A line starting `0. System: ` is a system line, never message `0`.
+- A tag is recognized by its prefix:
+  - `[?` is a flag; `[reply: ` is a reply.
+  - `[date ` and `[gap]` (system lines only) are date and gap tags.
+  - `<` followed by a known kind, or by `x-`, is a media tag. A kind is known when its token is followed by a space or `>`.
+  - Any other bracketed tag is an `othertag`, which readers skip.
 - The body cannot start with an unescaped `[` or `<`, so the boundary between tags and body is unique.
 - In a reply tag, the label runs up to the first ` <`, ` "` or `]`. Labels cannot contain `<`, `"` or `]`.
 
@@ -348,7 +370,10 @@ Agents that need these read the JSON.
 | `status` | `ok`, `partial` or `unparseable` |
 | `detection.mode` | `auto`, `hint` (`--app`/`--platform`) or `user` (chosen interactively) |
 | `options.now` | The run's "now". It is an **input**: pin it with `--now` to reproduce a run. |
-| `removed_items` | IDs of `gap` items deleted because this batch closed the gap (§4) |
+| `removed_items` | IDs of items this batch retired: `gap` items it closed, and `pill_candidate` separators it disproved (§4, HLD §7.6) |
+| `ui.lang_source` | `hint`, `plugin` or `inferred` |
+| `sides` | This source's mapping from screen side to participant (HLD §7.7 step 2) |
+| `type` (batches) | `"parse"` (default), `"append"`, or `"renumber"`. A renumber entry has no sources; it holds `id_map: {"old": "new"}` and the new `id_epoch`. |
 | `processed_at` | The only field outside the determinism guarantee (NFR-DET-1) |
 
 ### 3.5 Items
@@ -381,7 +406,8 @@ Common fields:
                      "hsv": [0.31, 0.12, 0.08, 0.05, 0.04, 0.03, 0.03, 0.02, 0.02, 0.02, 0.03, 0.05, 0.06, 0.06, 0.04, 0.04]},
              "confidence": 0.98}],
   "reply_to": null,
-  "fingerprint": {"sender_id": "p1", "kind": "image", "text": "i'm in the gym 💪", "time": "08:40"},
+  "fingerprint": {"sender_id": "p1", "kind": "image", "text": "i'm in the gym", "emoji": ["9c3a5b17e0d2f481"],
+                  "time": "08:40", "time_alt": [], "quote": null},
   "provenance": [{"source": "shot-1", "bbox": [30, 290, 720, 1180], "anchor_bbox": [30, 290, 720, 1180],
                   "cut": "none", "selected": true}],
   "confidence": 0.93, "flags": []
@@ -401,10 +427,10 @@ Common fields:
 | `dir` | `ltr` or `rtl`: the paragraph direction (FR-OCR-2) |
 | `spans` | Present only when needed. `type` is `emoji` (`value` is `"\uFFFD"` if unidentified) or `low_confidence` (a run of text OCR read with low confidence). |
 | `media[].kind` | A kind from §2.4, including `x-…` kinds |
-| `media[].attrs` | Standard keys: `duration_s` (int), `file_name`, `size_text`, `pages`, `url`, `title`, `label`, `emoji`, `call_type` (`voice`/`video`), `missed` (bool), `question`, `view_once_kind`. `x-` kinds use the keys their plugin declares. |
+| `media[].attrs` | Standard keys: `duration_s` (int), `file_name`, `size_text`, `pages`, `url`, `title`, `label`, `name` (contact), `emoji`, `call_type` (`voice`/`video`), `missed` (bool), `question`, `view_once_kind`. `x-` kinds use the keys their plugin declares. |
 | `media[].file` | The crop, or `null` (`--no-media`, or a kind without a picture) |
 | `media[].sig` | Image signature, used to match reply thumbnails and to align appends without pixels (FR-OUT-4): `phash` of the whole crop, `phash_center` of its center square, and `hsv`, a 16-bin histogram |
-| `fingerprint` | Normalized keys for matching appended batches. It does not identify the message. |
+| `fingerprint` | **Normative matching keys** for later appends (HLD §7.5, §7.7). It does not identify the message. <br>• `sender_id` <br>• `kind`: `text` or the first media kind <br>• `text`: NFC, casefolded, collapsed whitespace, emoji removed <br>• `emoji`: glyph pHashes in order, so `�` and an identified emoji can still match <br>• `time`, plus `time_alt` (OCR alternatives) <br>• `quote`: normalized quote text or `null` <br>Media signatures are read from `media[].sig`. |
 | `revisions` | Optional. When a later batch saw this message more clearly: `[{"batch", "field", "old", "reason"}]` |
 
 #### `reply_to`
@@ -430,13 +456,15 @@ Common fields:
 
 ```json
 {"id": "s1", "type": "date_separator", "date": "2026-11-22", "time": null, "weekday": "Sun",
- "label": "Sunday", "resolution": "weekday_label", "anchor_source": "shot-1",
- "provenance": [{"source": "shot-1", "bbox": [470, 212, 610, 262], "anchor_bbox": [470, 212, 610, 262],
+ "label": "Sunday", "resolution": "weekday_label", "origin": "chip", "anchor_source": "shot-2",
+ "provenance": [{"source": "shot-2", "bbox": [470, 212, 610, 262], "anchor_bbox": [470, 212, 610, 262],
                  "cut": "none", "selected": true}],
  "confidence": 0.95, "flags": []}
 ```
 
-`resolution` is `absolute`, `absolute_year_inferred`, `numeric`, `today`, `yesterday`, `weekday_label`, `user`, or `unresolved` (then `date` is `null`). Date context lines (`from=pill`) are **not** items; the renderer derives them from the messages' `date_source`.
+- `resolution` is `absolute`, `absolute_year_inferred`, `numeric`, `today`, `yesterday`, `weekday_label`, `user`, or `unresolved` (then `date` is `null`).
+- `origin` is `chip` (a separator seen moving with the content), or `pill_candidate` (a top chip that could not be shown not to be the pinned pill; HLD §7.6 step 3).
+- Date context lines (`from=pill`) are **not** items; the renderer derives them from the messages' `date_source`.
 
 #### `system`
 
@@ -446,7 +474,7 @@ Common fields:
  "provenance": [ … ], "confidence": 0.96, "flags": []}
 ```
 
-`subtype` comes from the plugin's vocabulary, for example `encryption_notice`, `missed_call`, `match_created`, `disappearing_messages` or `unknown`. Plugins may add `x-…` subtypes.
+`subtype` comes from the plugin's vocabulary, for example `encryption_notice`, `missed_call`, `match_created` or `disappearing_messages`. `unknown` marks an element the plugin could not classify, flagged `ELEMENT_UNRECOGNIZED`. Plugins may add `x-…` subtypes.
 
 #### `gap`
 
@@ -465,15 +493,18 @@ Taken from another transcript:
 
 Message IDs are **dotted-decimal ordinals**, written as strings: `"1"`, `"7"`, `"4.1"`, `"0.3"`, `"4.0.1"`.
 
-1. **Array order is authoritative.** The order of `items` is the conversation order. IDs sort in the same order, except around items flagged `ORDER_UNCERTAIN`: if a later append shows that two gap-separated pieces were in the wrong order, the array is reordered and the IDs stay the same.
+1. **Array order is authoritative.** The order of `items` is the conversation order. IDs sort in the same order, with one exception, a **reorder seam**. Pieces separated by a gap carry `ORDER_UNCERTAIN`. If a later append shows two such pieces were in the wrong order, the array is reordered and the IDs stay the same, so ID order breaks at that seam. IDs are always unique.
 2. **Comparing IDs.** Compare the dot-separated parts as integers, left to right. A prefix sorts first: `0.1 < 1 < 1.1 < 1.1.1 < 1.2 < 2`. **Never compare IDs as decimals or as strings** (`4.10` comes after `4.9`).
 3. **First run.** Messages are numbered `1, 2, 3, …`. `0` alone is never a message ID; it marks system lines in the text view.
 4. **Appending at the end.** New messages after the last one continue from the highest leading number: `N+1, N+2, …`.
 5. **Inserting before or between.** For *k* new messages between neighbours P and Q, where P is a virtual `0` before the first message:
-   1. Use `P.1 … P.k` if `P.k` sorts before Q.
-   2. Otherwise (Q extends P, e.g. P = `4`, Q = `4.1`), append `.0` parts until the IDs sort before Q: `4.0.1 … 4.0.k`.
+   1. **Normal case, P sorts before Q.**
+      - Use `P.1 … P.k` if `P.k` sorts before Q.
+      - Otherwise (Q extends P, e.g. P = `4` and Q = `4.1`), append `.0` parts until the IDs sort before Q: `4.0.1 … 4.0.k`.
+   2. **At a reorder seam, P sorts after Q** (possible only after rule 1). Use `P.(m+1) … P.(m+k)`, where m is the largest last part among existing IDs of the form `P.x`, or 0 if there are none. They sort after P but not before Q, which rule 1 allows at a seam.
+   3. **Always unique.** Skip any candidate already issued in this epoch and take the next one in the same sequence. In case 1, if that sequence no longer sorts before Q, add a `.0` level.
 
-   Each further prepend before an earlier prepend adds one level (`0.1` → `0.0.1`). The optional `renumber` command compacts IDs again (FR-MRG-8).
+   Each further prepend before an earlier prepend adds one level (`0.1` → `0.0.1`). `chatsocr renumber` compacts the IDs again (FR-MRG-8).
 6. **Stability.** Once given out, an ID never changes and is never reused within an `id_epoch`. The only exception is `chatsocr renumber`, which writes an ID map and increments `id_epoch`.
 7. **System item IDs** (`s1`, `s2`, …) are given out in creation order, are never reused, and say nothing about position.
 
@@ -493,7 +524,7 @@ Message IDs are **dotted-decimal ordinals**, written as strings: `"1"`, `"7"`, `
 ```
 6. 16:33 Yuval: [reply: 5] you looks beautiful
 0. System: [gap]
-7. 16:36 Bar: תודה!!
+7. 16:36 Bar: [?date] תודה!!
 ```
 
 After an append whose screenshots cover the gap, the `gap` item is removed (listed in `removed_items`):
@@ -527,9 +558,13 @@ After an append whose screenshots cover the gap, the `gap` item is removed (list
 - `warn`: an uncertain value is in the output.
 - `error`: something is missing or failed.
 
-**Shown:** the marker in the text view. *scored* means it is shown only below the threshold; *header* means it appears in the `# warnings:` line; — means JSON only.
+**Shown:** the marker in the text view.
+- *scored*: recorded, with its confidence, whenever the field's confidence is below the record floor (default 0.95), and shown only when also below the display threshold (default 0.80).
+- Any other marker is *categorical* and always shown.
+- *header*: appears in the `# warnings:` line.
+- —: JSON only.
 
-**Plugin-settable:** plugins may set only `SIDE_UNCERTAIN`, `MEDIA_KIND_UNCERTAIN`, `ELEMENT_UNRECOGNIZED` and `PARTIAL_MESSAGE`. All other flags come from the engine.
+**Plugin-settable:** plugins may set only `SIDE_UNCERTAIN`, `MEDIA_KIND_UNCERTAIN` and `ELEMENT_UNRECOGNIZED`. All other flags come from the engine. Partial visibility is reported by plugins through `Element.cut`.
 
 **Transcript, source and batch level** (in `warnings`):
 
@@ -562,15 +597,15 @@ After an append whose screenshots cover the gap, the `gap` item is removed (list
 | `EMOJI_UNIDENTIFIED` | text | warn | `[?emoji]` and `�` |
 | `EMOJI_LOW_CONFIDENCE` | text | warn | `[?emoji s]`, scored. This includes sequences shown as their component emoji. |
 | `SIDE_UNCERTAIN` | sender | warn | `[?sender s]`, scored |
-| `PARTIAL_MESSAGE` | text | warn | `[?partial]` |
+| `PARTIAL_MESSAGE` | text or media | warn | `[?partial]`: the top or bottom was never seen, or the chosen text or media was partly hidden by an overlay |
 | `MEDIA_KIND_UNCERTAIN` | media | warn | `[?media s]`, scored |
-| `ELEMENT_UNRECOGNIZED` | media | warn | `<unknown>` |
+| `ELEMENT_UNRECOGNIZED` | kind | warn | `<unknown>` on a message; `[?kind]` on a system line |
 | `TIME_UNREADABLE` | time | warn | `[?time]` |
 | `TIME_LOW_CONFIDENCE` | time | warn | `HH:MM?`, scored |
 | `TIME_CORRECTED` | time | warn | `HH:MM?` (the raw value is kept) |
 | `TIME_NON_MONOTONIC` | time | warn | `HH:MM?` |
 | `DATE_UNKNOWN` | date | warn | `[?date]` |
-| `DATE_LOW_CONFIDENCE` | date | warn | `[date …?]`, scored. Covers implausible weekday results and weak anchors. |
+| `DATE_LOW_CONFIDENCE` | date | warn | `[date …?]` or `[?date]`, scored. Covers implausible weekday results, weak anchors, an undecided day/month order, and pill evidence that disagrees with the separator. |
 | `DATE_LABEL_UNPARSED` | date | warn | `[date ? "raw"]` |
 | `DATE_NON_MONOTONIC` | date | warn | `[date …?]` |
 | `YEAR_INFERRED` | date | info | the raw label is shown |
